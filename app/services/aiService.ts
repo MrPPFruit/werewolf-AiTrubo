@@ -1,13 +1,28 @@
 import { GameState, Role } from "@/app/types/game";
+import { startVoskRecording, stopVoskRecording } from './voskService';
 
 // Type declaration for Electron API
+interface VoskResult {
+    type: 'result' | 'partial' | 'ready';
+    data: {
+        text?: string;
+        partial?: string;
+    };
+}
+
+// Native Electron API Type Definition
 declare global {
     interface Window {
         electronAPI?: {
             isElectron: boolean;
             startRecording: (callback: (text: string) => void) => void;
-            stopRecording: () => Promise<{ success: boolean }>;
-        };
+            stopRecording: () => Promise<{ success: boolean; error?: string }>;
+            voskInit: () => Promise<{ success: boolean; error?: string }>;
+            voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
+            onVoskResult: (callback: (data: VoskResult) => void) => void;
+            offVoskResult: () => void;
+            getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
+        }
     }
 }
 
@@ -18,6 +33,41 @@ let analyser: AnalyserNode | null = null;
 let microphone: MediaStreamAudioSourceNode | null = null;
 let audioLevelInterval: number | null = null;
 let currentStream: MediaStream | null = null;
+
+// Helper to start audio monitoring
+const startAudioMonitoring = async (onAudioLevel: (level: number) => void, onError?: (err: any) => void) => {
+    try {
+        // Reuse existing stream or request new one (if not provided by Vosk yet, but here we usually grab our own for viz)
+        const stream = currentStream || await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!currentStream) currentStream = stream;
+
+        if (audioContext) audioContext.close();
+        audioContext = new AudioContext();
+        analyser = audioContext.createAnalyser();
+        microphone = audioContext.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+        analyser.fftSize = 256;
+
+        const bufferLength = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+
+        // Monitor audio level
+        const interval = window.setInterval(() => {
+            if (analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+                const level = Math.min(100, (average / 255) * 200); // Scale to 0-100
+                onAudioLevel(Math.round(level));
+            }
+        }, 100);
+
+        return interval;
+    } catch (err) {
+        console.error('[Audio] Failed to access microphone for level monitoring', err);
+        onError?.(err);
+        return null;
+    }
+};
 
 /**
  * Check microphone permission status
@@ -85,24 +135,47 @@ export const requestMicrophonePermission = async (): Promise<boolean> => {
     }
 };
 
-export const startSpeechRecognition = (
+export const startSpeechRecognition = async (
+    preferredSource: 'SYSTEM' | 'MICROPHONE',
     onResult: (text: string) => void,
     onError?: (err: any) => void,
     onAudioLevel?: (level: number) => void
 ) => {
-    // PRIORITY 1: Use Electron API if available (Desktop Mode)
-    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
-        console.log('[Audio] Using Electron system audio capture');
+    // OPTION 2: Vosk (Offline/Electron - Microphone OR System)
+    // Uses Vosk (WASM) for ASR, and either getUserMedia or desktopCapturer for audio.
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron && (preferredSource === 'MICROPHONE' || preferredSource === 'SYSTEM')) {
+        console.log(`[Audio] Using Vosk (Offline WASM) for ${preferredSource}`);
         try {
-            window.electronAPI.startRecording(onResult);
-            return;
+            startVoskRecording(
+                (text, isFinal) => {
+                    if (isFinal) {
+                        // Apply rudimentary correction on final results
+                        correctTextWithAI(text).then(corrected => {
+                            onResult(corrected);
+                        });
+                    } else {
+                        onResult(text); // Partials
+                    }
+                },
+                (err) => {
+                    console.error('[Audio] Vosk Error:', err);
+                    onError?.(err);
+                },
+                // Pass audio level callback directly to Vosk service to avoid double getUserMedia
+                onAudioLevel,
+                preferredSource
+            );
+
+            // Note: startAudioMonitoring is purposely NOT called here because startVoskRecording handles it.
         } catch (e) {
-            console.error('[Audio] Electron API failed, falling back to Web Speech API', e);
-            // Fall through to Web Speech API
+            console.error('[Audio] Failed to start Vosk', e);
+            onError?.("离线语音模块启动失败");
         }
+        return;
     }
 
-    // FALLBACK: Web Speech API (Browser Mode)
+    // OPTION 3: Web Speech API (Browser)
+    // Used if preferredSource is 'MICROPHONE' OR if not in Electron
     if (typeof window === 'undefined') return;
 
     // @ts-ignore
@@ -112,39 +185,11 @@ export const startSpeechRecognition = (
         return;
     }
 
-    console.log('[Audio] Using Web Speech API (microphone)');
+    console.log('[Audio] Using Web Speech API (Microphone)');
 
     // Initialize Web Audio API for level monitoring
     if (onAudioLevel) {
-        const initAudioMonitoring = async () => {
-            try {
-                // Reuse existing stream or request new one
-                const stream = currentStream || await navigator.mediaDevices.getUserMedia({ audio: true });
-                if (!currentStream) currentStream = stream;
-
-                audioContext = new AudioContext();
-                analyser = audioContext.createAnalyser();
-                microphone = audioContext.createMediaStreamSource(stream);
-                microphone.connect(analyser);
-                analyser.fftSize = 256;
-
-                const bufferLength = analyser.frequencyBinCount;
-                const dataArray = new Uint8Array(bufferLength);
-
-                // Monitor audio level
-                audioLevelInterval = window.setInterval(() => {
-                    analyser!.getByteFrequencyData(dataArray);
-                    const average = dataArray.reduce((a, b) => a + b) / bufferLength;
-                    const level = Math.min(100, (average / 255) * 200); // Scale to 0-100
-                    onAudioLevel(Math.round(level));
-                }, 100);
-            } catch (err) {
-                console.error('[Audio] Failed to access microphone for level monitoring', err);
-                onError?.(err);
-            }
-        };
-
-        initAudioMonitoring();
+        audioLevelInterval = await startAudioMonitoring(onAudioLevel, onError) as unknown as number;
     }
 
     recognition = new SpeechRecognition();
@@ -160,7 +205,13 @@ export const startSpeechRecognition = (
     };
 
     recognition.onerror = (event: any) => {
-        console.error("Speech recognition error", event.error);
+        // 'network' error is common in Electron without API keys.
+        // We log it as a warning but still pass it to the handler so UI can show a friendly message.
+        if (event.error === 'network') {
+            console.warn("[Audio] Speech recognition network error. Microphone level should still work.");
+        } else {
+            console.error("Speech recognition error", event.error);
+        }
         onError?.(event.error);
     };
 
@@ -175,7 +226,9 @@ export const stopSpeechRecognition = () => {
     // Stop Electron recording if available
     if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
         window.electronAPI.stopRecording();
-        return;
+        stopVoskRecording();
+    } else {
+        stopVoskRecording(); // Just in case it was running
     }
 
     // Stop Web Speech API
@@ -210,6 +263,37 @@ export const transcribeAudio = async (blob: Blob): Promise<string> => {
     return "[语音识别需使用实时模式，请更新调用逻辑]";
 };
 
+/**
+ * Simple "AI" correction for common homophones in Werewolf.
+ * In a real scenario, this would call an LLM API.
+ */
+export const correctTextWithAI = async (text: string): Promise<string> => {
+    const corrections: Record<string, string> = {
+        "寓言家": "预言家",
+        "雨颜家": "预言家",
+        "郎人": "狼人",
+        "浪人": "狼人",
+        "怒屋": "女巫",
+        "吕武": "女巫",
+        "猎忍": "猎人",
+        "列人": "猎人",
+        "首位": "守卫",
+        "手卫": "守卫",
+        "存民": "村民",
+        "村名": "村民",
+        "京水": "金水",
+        "查沙": "查杀",
+        "汉跳": "悍跳",
+        "汉条": "悍跳",
+    };
+
+    let corrected = text;
+    for (const [key, value] of Object.entries(corrections)) {
+        corrected = corrected.replace(new RegExp(key, 'g'), value);
+    }
+    return corrected;
+};
+
 export const analyzeGameState = async (gameState: GameState): Promise<{
     analysis: string;
     probabilities: Record<string, number>;
@@ -224,7 +308,7 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
     const roleProbabilities: Record<string, Record<string, number>> = {};
 
     gameState.players.forEach(player => {
-        if (!player.isDead) {
+        if (player.status === 'ALIVE') {
             const wolfProb = Math.floor(Math.random() * 100);
             probabilities[player.id] = wolfProb;
 
@@ -237,7 +321,7 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
         }
     });
 
-    const alivePlayers = gameState.players.filter(p => !p.isDead);
+    const alivePlayers = gameState.players.filter(p => p.status === 'ALIVE');
     const aliveWolves = alivePlayers.filter(p => p.role === 'WEREWOLF').length;
     const aliveGood = alivePlayers.length - aliveWolves;
 

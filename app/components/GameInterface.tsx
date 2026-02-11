@@ -60,6 +60,12 @@ export default function GameInterface() {
     const [micPermission, setMicPermission] = useState<'granted' | 'denied' | 'prompt' | 'unsupported' | 'checking'>('checking');
     const [showPermissionPrompt, setShowPermissionPrompt] = useState(false);
 
+
+
+    // Track who we are recording separately from the selected player (modal)
+    // This allows us to close the modal while recording continues
+    const [recordingTargetId, setRecordingTargetId] = useState<string | null>(null);
+
     const selectedPlayer = players.find(p => p.id === selectedPlayerId);
 
     // Auto-Analyze on Phase Change
@@ -77,10 +83,17 @@ export default function GameInterface() {
         runAnalysis();
     }, [phase, day, players.length]); // Re-run on major changes (removed players dependency to avoid loops if players update triggers this)
 
-    // Check microphone permission on mount
+    // Check microphone permission AND pre-warm Audio Engine on mount
     useEffect(() => {
-        const checkPermission = async () => {
+        const checkPermissionAndInit = async () => {
             const { checkMicrophonePermission } = await import('@/app/services/aiService');
+            const { initAudioEngine } = await import('@/app/services/voskService');
+
+            // 1. Kick off Audio Engine Init (Background)
+            // We don't await this immediately to keep UI responsive, but it starts the worklet loading.
+            initAudioEngine().catch(err => console.error("Audio Engine Pre-warm failed:", err));
+
+            // 2. Check Permissions
             const status = await checkMicrophonePermission();
             setMicPermission(status as any);
 
@@ -90,7 +103,7 @@ export default function GameInterface() {
             }
         };
 
-        checkPermission();
+        checkPermissionAndInit();
     }, []);
 
     const handleNextPhase = () => {
@@ -119,6 +132,7 @@ export default function GameInterface() {
             if (isRecording) {
                 // Stop recording
                 setIsRecording(false);
+                setRecordingTargetId(null);
                 stopSpeechRecognition();
                 setLiveTranscript('');
                 setAudioLevel(0);
@@ -129,7 +143,7 @@ export default function GameInterface() {
                 // If we are stopping, generate log for the *active* recording player
                 // We need to know who that was.
                 // Let's assume `selectedPlayerId` holds the recording player if isRecording is true.
-                if (selectedPlayerId) {
+                if (recordingTargetId) {
                     // const text = await transcribeAudio(new Blob([]));
                     // addLog('SPEECH', text, selectedPlayerId);
                 }
@@ -141,10 +155,13 @@ export default function GameInterface() {
                 // 1. Stop Player A (save log).
                 // 2. Start Player B.
 
-                if (targetId && selectedPlayerId && targetId !== selectedPlayerId) {
+                if (targetId && recordingTargetId && targetId !== recordingTargetId) {
                     // We stopped previous, now start new
-                    setSelectedPlayerId(targetId);
-                    setIsRecording(true);
+                    // Wait a tick for cleanup? Or just start.
+                    // Let's just fall through to start if we can... 
+                    // But we used return logic.
+                    // Let's handle switching targets explicitly if needed.
+                    // For now, simple toggle: Stop current. User clicks again to start new.
                 } else {
                     // We just toggled off (or on if it was same player)
                     // If it was same player, we just stopped.
@@ -156,10 +173,17 @@ export default function GameInterface() {
                 const activePlayerId = targetId || selectedPlayerId;
                 if (activePlayerId) {
                     setIsRecording(true);
+                    setRecordingTargetId(activePlayerId);
+                    // Close the modal so the visualizer is visible!
+                    setSelectedPlayerId(null);
+
                     setLiveTranscript('');
                     setRecordingDuration(0);
 
+                    const source = (activePlayerId === myPlayerId) ? 'MICROPHONE' : 'SYSTEM';
+
                     startSpeechRecognition(
+                        source,
                         (text) => {
                             // Update live transcript
                             setLiveTranscript(prev => prev + ' ' + text);
@@ -168,9 +192,17 @@ export default function GameInterface() {
                             addLog('SPEECH', text, activePlayerId);
                         },
                         (err) => {
-                            console.error(err);
-                            setIsRecording(false);
-                            setLiveTranscript('');
+                            // 'network' error is expected in Electron, use warn.
+                            if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
+                                console.warn("[Audio] Speech Recognition (Network/Service) unavailable:", err);
+                                setLiveTranscript('(语音转文字服务不可用，但麦克风正常工作)');
+                            } else {
+                                console.error("Speech Recognition Error:", err);
+                                setLiveTranscript(`(错误: ${err})`);
+                            }
+
+                            // We deliberately do NOT call setIsRecording(false) here, 
+                            // to keep the audio level meter functionality alive.
                         },
                         (level) => {
                             // Update audio level
@@ -252,11 +284,6 @@ export default function GameInterface() {
                 </div>
 
                 <div className="flex gap-2 items-center">
-                    {/* System Audio Tip */}
-                    <div className="hidden lg:flex items-center gap-2 text-[10px] text-slate-500 bg-slate-900/50 px-3 py-1 rounded-full border border-slate-800 animate-in fade-in slide-in-from-top-2">
-                        <span className="font-bold text-violet-400">设备提示:</span>
-                        识别电脑内部音频需将系统录音设备设为"立体声混音"
-                    </div>
                     <button onClick={resetGame} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-red-400 transition-colors" title="重置对局">
                         <RefreshCw size={20} />
                     </button>
@@ -282,7 +309,7 @@ export default function GameInterface() {
                                         onClick={() => setSelectedPlayerId(player.id)}
                                         latestSpeech={lastLog?.message}
                                         onQuickRecord={(e) => handleAction('RECORD', undefined, player.id)}
-                                        isRecording={isRecording && selectedPlayerId === player.id}
+                                        isRecording={isRecording && recordingTargetId === player.id}
                                         relations={gameState.relations?.map(r => ({
                                             ...r,
                                             sourceNumber: players.find(p => p.id === r.sourceId)?.number
@@ -447,6 +474,7 @@ export default function GameInterface() {
                                 <span className="text-sm font-bold">当选警长</span>
                             </button>
 
+                            {/* Record Button REMOVED as per user request (Duplicate of Quick Record on card) 
                             <button
                                 onClick={() => handleAction('RECORD')}
                                 className={clsx(
@@ -458,7 +486,8 @@ export default function GameInterface() {
                             >
                                 {isRecording ? <MicOff size={24} /> : <Mic size={24} />}
                                 <span className="text-sm font-bold">{isRecording ? '停止录音' : '录制发言'}</span>
-                            </button>
+                            </button> 
+                            */}
 
                             {/* Mark Teammate (Only for Wolves) */}
                             {['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(players.find(p => p.id === myPlayerId)?.role || '') && selectedPlayerId !== myPlayerId && (

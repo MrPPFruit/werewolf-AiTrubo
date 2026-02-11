@@ -1,4 +1,5 @@
 @echo off
+@chcp 65001 >nul
 echo 正在提交到 Git...
 echo.
 
