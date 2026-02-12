@@ -12,6 +12,7 @@ declare global {
             onVoskResult: (callback: (data: VoskResult) => void) => void;
             offVoskResult: () => void;
             voskFlush?: () => Promise<{ success: boolean; error?: string }>;
+            voskSetMute?: (mute: boolean) => Promise<{ success: boolean }>;
             getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
         }
     }
@@ -211,6 +212,11 @@ export const startVoskRecording = async (
 
         if (!window.electronAPI?.voskInit) throw new Error("Native API missing");
 
+        // UNMUTE first
+        if (window.electronAPI.voskSetMute) {
+            await window.electronAPI.voskSetMute(false);
+        }
+
         await prepareAudioEngine();
 
         if (!audioContext) throw new Error("AudioContext Init Failed");
@@ -271,7 +277,13 @@ export const stopVoskRecording = async (waitForFlush = true) => {
     if (window.electronAPI?.voskFlush && waitForFlush) {
         console.log('[SidecarVosk] Flushing buffer...');
         window.electronAPI.voskFlush().catch(e => console.error(e));
-        await new Promise(resolve => setTimeout(resolve, 600));
+        await new Promise(resolve => setTimeout(resolve, 800)); // Increased wait time
+    }
+
+    // MUTE Native Listener to prevent phantom packets from delayed flush for NEXT session
+    if (window.electronAPI?.voskSetMute) {
+        console.log('[SidecarVosk] Muting native listener...');
+        window.electronAPI.voskSetMute(true).catch(e => console.error(e));
     }
 
     // 2. Suspend Audio

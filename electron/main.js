@@ -7,6 +7,7 @@ const { DASHSCOPE_API_KEY } = require('./config');
 let mainWindow;
 let audioRecorder = null;
 let dashClient = null;
+let isVoskMuted = false;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -87,16 +88,7 @@ app.on('ready', () => {
 });
 
 // IPC Handlers for Audio Recording
-ipcMain.handle('get-desktop-sources', async () => {
-    const { desktopCapturer } = require('electron');
-    try {
-        const sources = await desktopCapturer.getSources({ types: ['screen'] });
-        return { success: true, sources };
-    } catch (e) {
-        console.error('Failed to get desktop sources:', e);
-        return { success: false, error: e.message };
-    }
-});
+
 
 ipcMain.handle('start-recording', async (event, options) => {
     try {
@@ -113,6 +105,12 @@ ipcMain.handle('start-recording', async (event, options) => {
     }
 });
 
+// IPC: Mute/Unmute
+ipcMain.handle('vosk-set-mute', async (event, mute) => {
+    isVoskMuted = mute;
+    return { success: true };
+});
+
 // IPC: Init
 ipcMain.handle('vosk-init', async () => {
     try {
@@ -127,10 +125,12 @@ ipcMain.handle('vosk-init', async () => {
             dashClient.stop();
         }
 
+
+
         console.log('[Main] Initializing DashScope Client...');
         dashClient = new DashScopeClient(
             (text, isFinal) => {
-                if (mainWindow) {
+                if (mainWindow && !isVoskMuted) {
                     mainWindow.webContents.send('vosk-result', {
                         type: isFinal ? 'result' : 'partial',
                         data: isFinal ? { text } : { partial: text }

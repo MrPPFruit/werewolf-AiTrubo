@@ -61,7 +61,7 @@ const GAME_TEMPLATES = [
         playerCount: 10,
         roles: {
             VILLAGER: 4, WEREWOLF: 3, SEER: 1, WITCH: 1, HUNTER: 1,
-            IDIOT: 0, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0
+            IDIOT: 0, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0
         },
         desc: '节奏较快，适合时间有限时的娱乐'
     },
@@ -71,7 +71,7 @@ const GAME_TEMPLATES = [
         playerCount: 9,
         roles: {
             VILLAGER: 3, WEREWOLF: 3, SEER: 1, WITCH: 1, HUNTER: 1,
-            IDIOT: 0, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0
+            IDIOT: 0, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0
         },
         desc: '萌新入门首选，逻辑线相对简单'
     },
@@ -133,6 +133,11 @@ export default function GameSetup() {
                     创建对局
                 </h1>
                 <p className="text-slate-400">选择经典版型或自定义配置</p>
+            </div>
+
+            {/* Version Display */}
+            <div className="absolute top-4 right-4 text-slate-500 font-mono text-xs opacity-50">
+                V0.1.1
             </div>
 
             <div className="grid md:grid-cols-12 gap-8">

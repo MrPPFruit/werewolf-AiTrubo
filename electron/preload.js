@@ -23,10 +23,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // Native Vosk Bridge
     voskInit: () => ipcRenderer.invoke('vosk-init'),
+    voskFlush: () => ipcRenderer.invoke('vosk-flush'),
+    voskSetMute: (mute) => ipcRenderer.invoke('vosk-set-mute', mute),
     // Process audio is now fire-and-forget (results come via event)
     voskProcessAudio: (buffer) => ipcRenderer.send('vosk-process-audio', buffer),
     // Listen for Vosk results (Sidecar)
-    onVoskResult: (callback) => ipcRenderer.on('vosk-result', (_event, data) => callback(data)),
+    onVoskResult: (callback) => {
+        // Remove existing listeners to prevent duplicates if called multiple times
+        ipcRenderer.removeAllListeners('vosk-result');
+        ipcRenderer.on('vosk-result', (_event, data) => callback(data));
+    },
     offVoskResult: () => ipcRenderer.removeAllListeners('vosk-result'),
 
     // Check if running in Electron
