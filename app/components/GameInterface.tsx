@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useGameStore } from '@/app/store/gameStore';
 import { RefreshCw, Mic, ChevronRight, X, Skull, HeartPulse, Crown, MessageSquare, MicOff, BrainCircuit, Shield, Crosshair, Target } from 'lucide-react';
 import clsx from 'clsx';
@@ -48,6 +48,10 @@ export default function GameInterface() {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [aiAnalysis, setAiAnalysis] = useState<string>('');
     const [wolfProbabilities, setWolfProbabilities] = useState<Record<string, number>>({});
+    const [speechFilterDay, setSpeechFilterDay] = useState<string>('ALL'); // For Modal Speech Filter
+    const [editingLogId, setEditingLogId] = useState<string | null>(null); // For Speech Log Editing
+    const [editText, setEditText] = useState<string>(''); // For Speech Log Editing
+    const [confirmingRestoreId, setConfirmingRestoreId] = useState<string | null>(null); // For Restore Confirmation
     const [winRate, setWinRate] = useState<number>(50);
     const [dangerAlert, setDangerAlert] = useState<string | null>(null);
 
@@ -66,6 +70,12 @@ export default function GameInterface() {
     // Track who we are recording separately from the selected player (modal)
     // This allows us to close the modal while recording continues
     const [recordingTargetId, setRecordingTargetId] = useState<string | null>(null);
+    const liveTranscriptRef = useRef(''); // Ref to track latest transcript for async access
+
+    // Sync ref
+    useEffect(() => {
+        liveTranscriptRef.current = liveTranscript;
+    }, [liveTranscript]);
 
     const selectedPlayer = players.find(p => p.id === selectedPlayerId);
 
@@ -88,11 +98,11 @@ export default function GameInterface() {
     useEffect(() => {
         const checkPermissionAndInit = async () => {
             const { checkMicrophonePermission } = await import('@/app/services/aiService');
-            const { initAudioEngine } = await import('@/app/services/voskService');
+            const { prepareAudioEngine } = await import('@/app/services/voskService');
 
             // 1. Kick off Audio Engine Init (Background)
             // We don't await this immediately to keep UI responsive, but it starts the worklet loading.
-            initAudioEngine().catch(err => console.error("Audio Engine Pre-warm failed:", err));
+            prepareAudioEngine().catch(err => console.error("Audio Engine Pre-warm failed:", err));
 
             // 2. Check Permissions
             const status = await checkMicrophonePermission();
@@ -116,6 +126,8 @@ export default function GameInterface() {
         }
     };
 
+    const [isSaving, setIsSaving] = useState(false); // Block UI during flush
+
     const handleAction = async (
         action: 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION' | 'TOGGLE_CAMPAIGN' | 'QUIT_ELECTION' | 'SET_MIXBLOOD_TARGET',
         payload?: any,
@@ -123,6 +135,9 @@ export default function GameInterface() {
     ) => {
         const id = targetId || selectedPlayerId;
         if (!id) return;
+
+        // Prevent new actions while saving previous audio
+        if (isSaving) return;
 
         // If recording someone else and starting a new record, stop the old one first?
         // For simplicity, if we are recording and switch targets, we just stop the current one (which is handled by isRecording logic below for same target).
@@ -132,41 +147,33 @@ export default function GameInterface() {
         if (action === 'RECORD') {
             if (isRecording) {
                 // Stop recording
-                setIsRecording(false);
+                setIsRecording(false); // Update UI immediately
+                setIsSaving(true); // Block interactions
+
+                // Wait for flush (async)
+                await stopSpeechRecognition();
+
+                // Consolidate transcript into one log entry
+                // Uses Ref to get the very latest text updated during the flush wait
+                const finalTranscript = liveTranscriptRef.current;
+
+                if (finalTranscript && finalTranscript.trim()) {
+                    const target = recordingTargetId || selectedPlayerId;
+                    if (target) {
+                        addLog('SPEECH', finalTranscript.trim(), target);
+                    }
+                }
+
                 setRecordingTargetId(null);
-                stopSpeechRecognition();
                 setLiveTranscript('');
+                liveTranscriptRef.current = ''; // Reset ref too
                 setAudioLevel(0);
                 setIsAudioDetected(false);
                 setRecordingDuration(0);
-                // const text = await transcribeAudio(new Blob([]));
-                // addLog('SPEECH', text, selectedPlayerId);
-                // If we are stopping, generate log for the *active* recording player
-                // We need to know who that was.
-                // Let's assume `selectedPlayerId` holds the recording player if isRecording is true.
-                if (recordingTargetId) {
-                    // const text = await transcribeAudio(new Blob([]));
-                    // addLog('SPEECH', text, selectedPlayerId);
-                }
-
-                // If we clicked a *different* player to start recording, we should probably start recording them after stopping?
-                // But the current logic is a toggle.
-                // Let's keep it simple: Click record -> Toggle recording for THAT player.
-                // If recording is active for Player A, and we click Player B's mic:
-                // 1. Stop Player A (save log).
-                // 2. Start Player B.
+                setIsSaving(false); // Unblock interactions
 
                 if (targetId && recordingTargetId && targetId !== recordingTargetId) {
-                    // We stopped previous, now start new
-                    // Wait a tick for cleanup? Or just start.
-                    // Let's just fall through to start if we can... 
-                    // But we used return logic.
-                    // Let's handle switching targets explicitly if needed.
-                    // For now, simple toggle: Stop current. User clicks again to start new.
-                } else {
-                    // We just toggled off (or on if it was same player)
-                    // If it was same player, we just stopped.
-                    // If we weren't recording, we start.
+                    // Start new logic if needed
                 }
             } else {
                 // Start recording
@@ -175,9 +182,7 @@ export default function GameInterface() {
                 if (activePlayerId) {
                     setIsRecording(true);
                     setRecordingTargetId(activePlayerId);
-                    // Close the modal so the visualizer is visible!
                     setSelectedPlayerId(null);
-
                     setLiveTranscript('');
                     setRecordingDuration(0);
 
@@ -186,31 +191,28 @@ export default function GameInterface() {
                     startSpeechRecognition(
                         source,
                         (text) => {
-                            // Update live transcript
-                            setLiveTranscript(prev => prev + ' ' + text);
+                            // Update live transcript ONLY
+                            setLiveTranscript(prev => {
+                                if (!prev) return text;
+                                const lastChar = prev.trim().slice(-1);
+                                const isPunctuation = ['。', '！', '？', '；', '.', '!', '?', ';'].includes(lastChar);
+                                const separator = isPunctuation ? '' : '，';
+                                return prev + separator + text;
+                            });
                             setIsAudioDetected(true);
-                            // Add to log
-                            addLog('SPEECH', text, activePlayerId);
                         },
                         (err) => {
-                            // 'network' error is expected in Electron, use warn.
                             if (err === 'network' || err === 'not-allowed' || err === 'service-not-allowed') {
-                                console.warn("[Audio] Speech Recognition (Network/Service) unavailable:", err);
-                                setLiveTranscript('(语音转文字服务不可用，但麦克风正常工作)');
+                                console.warn("[Audio] Speech Recognition unavailable:", err);
+                                setLiveTranscript(prev => prev || '(语音服务不可用)');
                             } else {
                                 console.error("Speech Recognition Error:", err);
-                                setLiveTranscript(`(错误: ${err})`);
+                                setLiveTranscript(prev => prev + ` (错误: ${err})`);
                             }
-
-                            // We deliberately do NOT call setIsRecording(false) here, 
-                            // to keep the audio level meter functionality alive.
                         },
                         (level) => {
-                            // Update audio level
                             setAudioLevel(level);
-                            if (level > 5) {
-                                setIsAudioDetected(true);
-                            }
+                            if (level > 5) setIsAudioDetected(true);
                         }
                     );
                 }
@@ -333,7 +335,7 @@ export default function GameInterface() {
                                         player={player}
                                         isMe={player.id === myPlayerId}
                                         onClick={() => setSelectedPlayerId(player.id)}
-                                        latestSpeech={lastLog?.message}
+                                        // latestSpeech removed
                                         onQuickRecord={(e) => handleAction('RECORD', undefined, player.id)}
                                         onToggleCampaign={phase === 'ELECTION' ? (e) => handleAction('TOGGLE_CAMPAIGN', undefined, player.id) : undefined}
                                         onQuitElection={phase === 'ELECTION' ? (e) => handleAction('QUIT_ELECTION', undefined, player.id) : undefined}
@@ -462,13 +464,14 @@ export default function GameInterface() {
                 </div>
             </div>
 
-            {/* Player Action Modal (Simple Overlay) */}
+            {/* Player Action Modal (Expanded) */}
             {selectedPlayer && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-                    <div className="turbo-card w-full max-w-sm p-6 space-y-6 animate-in fade-in zoom-in duration-200">
-                        <div className="flex justify-between items-center border-b border-slate-800 pb-4">
-                            <h3 className="text-xl font-bold text-white">
-                                玩家 {selectedPlayer.number}
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                    <div className="turbo-card w-full max-w-4xl max-h-[90vh] p-6 space-y-6 animate-in fade-in zoom-in duration-200 overflow-hidden flex flex-col">
+                        <div className="flex justify-between items-center border-b border-slate-800 pb-4 shrink-0">
+                            <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                                <span className="bg-slate-700 w-8 h-8 rounded-full flex items-center justify-center text-sm">{selectedPlayer.number}</span>
+                                玩家操作面板
                                 {selectedPlayer.id === myPlayerId && <span className="ml-2 text-sm text-violet-400">(我)</span>}
                             </h3>
                             <button
@@ -482,279 +485,363 @@ export default function GameInterface() {
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
-                            <button
-                                onClick={() => handleAction('KILL')}
-                                className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-red-400 transition-colors"
-                                disabled={selectedPlayer.status === 'DEAD'}
-                            >
-                                <Skull size={24} />
-                                <span className="text-sm font-bold">标记死亡/放逐</span>
-                            </button>
-
-                            <button
-                                onClick={() => handleAction('REVIVE')}
-                                className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-green-400 transition-colors"
-                                disabled={selectedPlayer.status === 'ALIVE'}
-                            >
-                                <HeartPulse size={24} />
-                                <span className="text-sm font-bold">复活/救人</span>
-                            </button>
-
-                            <button
-                                onClick={() => handleAction('SHERIFF')}
-                                className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-amber-400 transition-colors"
-                            >
-                                <Crown size={24} />
-                                <span className="text-sm font-bold">当选警长</span>
-                            </button>
-
-                            {/* Record Button REMOVED as per user request (Duplicate of Quick Record on card) 
-                            <button
-                                onClick={() => handleAction('RECORD')}
-                                className={clsx(
-                                    "flex flex-col items-center justify-center p-4 rounded-xl gap-2 transition-all",
-                                    isRecording
-                                        ? "bg-red-500/20 text-red-500 animate-pulse border border-red-500/50"
-                                        : "bg-slate-800 hover:bg-slate-700 text-cyan-400"
-                                )}
-                            >
-                                {isRecording ? <MicOff size={24} /> : <Mic size={24} />}
-                                <span className="text-sm font-bold">{isRecording ? '停止录音' : '录制发言'}</span>
-                            </button> 
-                            */}
-
-                            {/* Mark Teammate (Only for Wolves) */}
-                            {['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(players.find(p => p.id === myPlayerId)?.role || '') && selectedPlayerId !== myPlayerId && (
-                                <button
-                                    onClick={() => handleAction('MARK_TEAMMATE')}
-                                    className={clsx(
-                                        "flex flex-col items-center justify-center p-4 rounded-xl gap-2 transition-all col-span-2",
-                                        selectedPlayer.isMarkedTeammate
-                                            ? "bg-red-900/40 text-red-400 border border-red-800"
-                                            : "bg-slate-800 hover:bg-slate-700 text-slate-400"
-                                    )}
-                                >
-                                    <Skull size={24} className={selectedPlayer.isMarkedTeammate ? "fill-current" : ""} />
-                                    <span className="text-sm font-bold">
-                                        {selectedPlayer.isMarkedTeammate ? '取消狼队友标记' : '标记为狼队友'}
-                                    </span>
-                                </button>
-                            )}
-
-                            {/* Seer Marks */}
-                            {players.find(p => p.id === myPlayerId)?.role === 'SEER' && selectedPlayerId !== myPlayerId && (
-                                <div className="col-span-2 grid grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 min-h-0 flex-1 overflow-hidden">
+                            {/* Left: Actions */}
+                            <div className="overflow-y-auto pr-2 space-y-6">
+                                <div className="grid grid-cols-2 gap-3">
                                     <button
-                                        onClick={() => handleAction('MARK_ROLE', 'BAD')}
-                                        className={clsx(
-                                            "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                            selectedPlayer.markedRole === 'BAD' ? "bg-red-500 text-white" : "bg-slate-800 text-red-400 hover:bg-slate-700"
-                                        )}
+                                        onClick={() => handleAction('KILL')}
+                                        className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-red-400 transition-colors"
+                                        disabled={selectedPlayer.status === 'DEAD'}
                                     >
-                                        查杀 (狼)
+                                        <Skull size={24} />
+                                        <span className="text-sm font-bold">标记死亡/放逐</span>
                                     </button>
+
                                     <button
-                                        onClick={() => handleAction('MARK_ROLE', 'GOOD')}
-                                        className={clsx(
-                                            "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                            selectedPlayer.markedRole === 'GOOD' ? "bg-green-500 text-white" : "bg-slate-800 text-green-400 hover:bg-slate-700"
-                                        )}
+                                        onClick={() => handleAction('REVIVE')}
+                                        className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-green-400 transition-colors"
+                                        disabled={selectedPlayer.status === 'ALIVE'}
                                     >
-                                        金水 (好)
+                                        <HeartPulse size={24} />
+                                        <span className="text-sm font-bold">复活/救人</span>
                                     </button>
-                                </div>
-                            )}
 
-                            {/* Witch Marks */}
-                            {players.find(p => p.id === myPlayerId)?.role === 'WITCH' && selectedPlayerId !== myPlayerId && (
-                                <div className="col-span-2 pt-2 border-t border-slate-800">
-                                    <button
-                                        onClick={() => handleAction('MARK_ROLE', selectedPlayer.markedRole === 'SILVER' ? null : 'SILVER')}
-                                        className={clsx(
-                                            "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                            selectedPlayer.markedRole === 'SILVER' ? "bg-slate-200 text-slate-900" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                                        )}
-                                    >
-                                        {selectedPlayer.markedRole === 'SILVER' ? '取消银水标记' : '标记为银水'}
-                                    </button>
-                                </div>
-                            )}
-
-                            {/* Guard Marks */}
-                            {players.find(p => p.id === myPlayerId)?.role === 'GUARD' && selectedPlayerId !== myPlayerId && (
-                                <div className="col-span-2 pt-2 border-t border-slate-800">
-                                    <button
-                                        onClick={() => handleAction('MARK_ROLE', selectedPlayer.markedRole === 'PROTECT' ? null : 'PROTECT')}
-                                        className={clsx(
-                                            "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                            selectedPlayer.markedRole === 'PROTECT' ? "bg-emerald-500 text-white" : "bg-slate-800 text-emerald-400 hover:bg-slate-700"
-                                        )}
-                                    >
-                                        <Shield size={18} className="mr-2" />
-                                        {selectedPlayer.markedRole === 'PROTECT' ? '取消守护标记' : '标记守护'}
-                                    </button>
-                                </div>
-                            )}
-
-                            {/* Gun Actions (Hunter / Wolf King) */}
-                            {/* Available to everyone for manual control, or restrict if needed. Let's make it available to "God" (User) */}
-                            <div className="col-span-2 pt-2 border-t border-slate-800 grid grid-cols-2 gap-3">
-                                <button
-                                    onClick={() => handleAction('TOGGLE_TAG', 'SHOOTER')}
-                                    className={clsx(
-                                        "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                        selectedPlayer.tags?.includes('SHOOTER') ? "bg-amber-600 text-white" : "bg-slate-800 text-amber-500 hover:bg-slate-700"
-                                    )}
-                                >
-                                    <Crosshair size={18} />
-                                    {selectedPlayer.tags?.includes('SHOOTER') ? '取消开枪标记' : '标记开枪'}
-                                </button>
-                                <button
-                                    onClick={() => handleAction('TOGGLE_TAG', 'SHOT_DEAD')}
-                                    className={clsx(
-                                        "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                        selectedPlayer.tags?.includes('SHOT_DEAD') ? "bg-red-600 text-white" : "bg-slate-800 text-red-500 hover:bg-slate-700"
-                                    )}
-                                >
-                                    <Target size={18} />
-                                    {selectedPlayer.tags?.includes('SHOT_DEAD') ? '取消带走标记' : '标记被带走'}
-                                </button>
-                            </div>
-                        </div>
-
-                        {/* Wolf Actions (Suicide) */}
-                        {selectedPlayer.status === 'ALIVE' && (
-                            <div className="col-span-2 pt-2 border-t border-slate-800">
-                                <button
-                                    onClick={() => {
-                                        if (confirm(`确定要让玩家 ${selectedPlayer.number} 自爆吗？这将直接进入入夜阶段。`)) {
-                                            handleAction('SELF_DESTRUCT');
-                                        }
-                                    }}
-                                    className="flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-red-500 hover:bg-red-900/20 hover:text-red-400"
-                                >
-                                    <Skull size={18} />
-                                    狼人自爆 (直接入夜)
-                                </button>
-                            </div>
-                        )}
-
-                        {/* Mixblood Actions */}
-                        {players.find(p => p.id === myPlayerId)?.role === 'MIXBLOOD' && selectedPlayerId !== myPlayerId && (
-                            <div className="col-span-2 pt-2 border-t border-slate-800">
-                                <button
-                                    onClick={() => handleAction('SET_MIXBLOOD_TARGET')}
-                                    className={clsx(
-                                        "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
-                                        players.find(p => p.id === myPlayerId)?.mixbloodTargetId === selectedPlayerId
-                                            ? "bg-purple-600 text-white"
-                                            : "bg-slate-800 text-purple-400 hover:bg-slate-700"
-                                    )}
-                                >
-                                    <Crown size={18} />
-                                    {players.find(p => p.id === myPlayerId)?.mixbloodTargetId === selectedPlayerId ? '已选为榜样' : '认作榜样'}
-                                </button>
-                            </div>
-                        )}
-
-                        {/* Sheriff Transfer (Only if Sheriff is dead or I am Sheriff) */}
-                        {/* Actually anyone can operate in this app as God, but let's show it if sheriffId exists and it's not selected player? No, if selected player IS target. */}
-                        {/* Logic: If there is a Sheriff, and we select another player, show "Hand over Badge". */}
-                        {/* If we select the Sheriff, show "Badge Lost". */}
-                        {gameState.sheriffId && (
-                            <div className="col-span-2 pt-2 border-t border-slate-800 grid grid-cols-1 gap-2">
-                                {gameState.sheriffId === selectedPlayerId ? (
-                                    <button
-                                        onClick={() => handleAction('SHERIFF_LOST')}
-                                        className="flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-slate-400 hover:bg-slate-700"
-                                    >
-                                        <X size={18} />
-                                        警徽流失
-                                    </button>
-                                ) : (
                                     <button
                                         onClick={() => handleAction('SHERIFF')}
-                                        className="flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-amber-500 hover:bg-slate-700"
+                                        className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-amber-400 transition-colors"
                                     >
-                                        <Crown size={18} />
-                                        移交警徽给他
+                                        <Crown size={24} />
+                                        <span className="text-sm font-bold">当选警长</span>
                                     </button>
-                                )}
-                            </div>
-                        )}
 
-                        {/* Relations: Shooter -> Victim */}
-                        {/* If selected player is marked as SHOOTER, we need a way to say WHO they shot. */}
-                        {/* Implementation: If I am looking at Player B, and Player A is tagged SHOOTER, maybe show "Player A shot this guy"? */}
-                        {/* Better: If selected player is ANYONE, show "Mark as Shot by..." list of Shooters? */}
-                        {players.some(p => p.tags?.includes('SHOOTER')) && (
-                            <div className="col-span-2 pt-2 border-t border-slate-800">
-                                <label className="text-xs text-slate-500 block mb-2">标记枪击关系 (谁带走了他?)</label>
-                                <div className="flex flex-wrap gap-2">
-                                    {players.filter(p => p.tags?.includes('SHOOTER')).map(shooter => (
+                                    {/* Mark Teammate (Only for Wolves) */}
+                                    {['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(players.find(p => p.id === myPlayerId)?.role || '') && selectedPlayerId !== myPlayerId && (
                                         <button
-                                            key={shooter.id}
-                                            onClick={() => handleAction('ADD_RELATION', { type: 'SHOOT', sourceId: shooter.id })}
-                                            className="px-3 py-2 bg-slate-800 rounded-lg text-xs text-amber-500 hover:bg-slate-700 flex items-center gap-1"
-                                            disabled={selectedPlayerId === shooter.id}
+                                            onClick={() => handleAction('MARK_TEAMMATE')}
+                                            className={clsx(
+                                                "flex flex-col items-center justify-center p-4 rounded-xl gap-2 transition-all col-span-2 md:col-span-1",
+                                                selectedPlayer.isMarkedTeammate
+                                                    ? "bg-red-900/40 text-red-400 border border-red-800"
+                                                    : "bg-slate-800 hover:bg-slate-700 text-slate-400"
+                                            )}
                                         >
-                                            <Crosshair size={12} />
-                                            {shooter.number}号开枪带走
+                                            <Skull size={24} className={selectedPlayer.isMarkedTeammate ? "fill-current" : ""} />
+                                            <span className="text-sm font-bold">
+                                                {selectedPlayer.isMarkedTeammate ? '取消狼队友' : '标记狼队友'}
+                                            </span>
                                         </button>
-                                    ))}
+                                    )}
+
+                                    {/* Seer Marks */}
+                                    {players.find(p => p.id === myPlayerId)?.role === 'SEER' && selectedPlayerId !== myPlayerId && (
+                                        <div className="col-span-2 grid grid-cols-2 gap-3 pt-2 border-t border-slate-800">
+                                            <button
+                                                onClick={() => handleAction('MARK_ROLE', 'BAD')}
+                                                className={clsx(
+                                                    "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    selectedPlayer.markedRole === 'BAD' ? "bg-red-500 text-white" : "bg-slate-800 text-red-400 hover:bg-slate-700"
+                                                )}
+                                            >
+                                                查杀 (狼)
+                                            </button>
+                                            <button
+                                                onClick={() => handleAction('MARK_ROLE', 'GOOD')}
+                                                className={clsx(
+                                                    "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    selectedPlayer.markedRole === 'GOOD' ? "bg-green-500 text-white" : "bg-slate-800 text-green-400 hover:bg-slate-700"
+                                                )}
+                                            >
+                                                金水 (好)
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Witch Marks */}
+                                    {players.find(p => p.id === myPlayerId)?.role === 'WITCH' && selectedPlayerId !== myPlayerId && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800">
+                                            <button
+                                                onClick={() => handleAction('MARK_ROLE', selectedPlayer.markedRole === 'SILVER' ? null : 'SILVER')}
+                                                className={clsx(
+                                                    "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    selectedPlayer.markedRole === 'SILVER' ? "bg-slate-200 text-slate-900" : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                                                )}
+                                            >
+                                                {selectedPlayer.markedRole === 'SILVER' ? '取消银水标记' : '标记为银水'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Guard Marks */}
+                                    {players.find(p => p.id === myPlayerId)?.role === 'GUARD' && selectedPlayerId !== myPlayerId && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800">
+                                            <button
+                                                onClick={() => handleAction('MARK_ROLE', selectedPlayer.markedRole === 'PROTECT' ? null : 'PROTECT')}
+                                                className={clsx(
+                                                    "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    selectedPlayer.markedRole === 'PROTECT' ? "bg-emerald-500 text-white" : "bg-slate-800 text-emerald-400 hover:bg-slate-700"
+                                                )}
+                                            >
+                                                <Shield size={18} className="mr-2" />
+                                                {selectedPlayer.markedRole === 'PROTECT' ? '取消守护标记' : '标记守护'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Gun Actions */}
+                                    <div className="col-span-2 pt-2 border-t border-slate-800 grid grid-cols-2 gap-3">
+                                        <button
+                                            onClick={() => handleAction('TOGGLE_TAG', 'SHOOTER')}
+                                            className={clsx(
+                                                "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                selectedPlayer.tags?.includes('SHOOTER') ? "bg-amber-600 text-white" : "bg-slate-800 text-amber-500 hover:bg-slate-700"
+                                            )}
+                                        >
+                                            <Crosshair size={18} />
+                                            {selectedPlayer.tags?.includes('SHOOTER') ? '取消开枪' : '标记开枪'}
+                                        </button>
+                                        <button
+                                            onClick={() => handleAction('TOGGLE_TAG', 'SHOT_DEAD')}
+                                            className={clsx(
+                                                "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                selectedPlayer.tags?.includes('SHOT_DEAD') ? "bg-red-600 text-white" : "bg-slate-800 text-red-500 hover:bg-slate-700"
+                                            )}
+                                        >
+                                            <Target size={18} />
+                                            {selectedPlayer.tags?.includes('SHOT_DEAD') ? '取消带走' : '标记被带走'}
+                                        </button>
+                                    </div>
+
+                                    {/* Wolf Actions (Suicide) */}
+                                    {selectedPlayer.status === 'ALIVE' && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800">
+                                            <button
+                                                onClick={() => {
+                                                    if (confirm(`确定要让玩家 ${selectedPlayer.number} 自爆吗？这将直接进入入夜阶段。`)) {
+                                                        handleAction('SELF_DESTRUCT');
+                                                    }
+                                                }}
+                                                className="flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-red-500 hover:bg-red-900/20 hover:text-red-400"
+                                            >
+                                                <Skull size={18} />
+                                                狼人自爆
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Sheriff Transfer Logic */}
+                                    {gameState.sheriffId && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800 grid grid-cols-1 gap-2">
+                                            {gameState.sheriffId === selectedPlayerId ? (
+                                                <button
+                                                    onClick={() => handleAction('SHERIFF_LOST')}
+                                                    className="flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-slate-400 hover:bg-slate-700"
+                                                >
+                                                    <X size={18} />
+                                                    警徽流失
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    onClick={() => handleAction('SHERIFF')}
+                                                    className="flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-amber-500 hover:bg-slate-700"
+                                                >
+                                                    <Crown size={18} />
+                                                    移交警徽给他
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </div>
-                        )}
+
+
+                            {/* Right: Speech History */}
+                            <div className="flex flex-col h-full bg-slate-900/50 rounded-xl border border-slate-800 overflow-hidden">
+                                <div className="p-3 border-b border-slate-800 flex justify-between items-center bg-slate-900">
+                                    <h4 className="text-sm font-bold text-slate-300 flex items-center gap-2">
+                                        <MessageSquare size={16} />
+                                        发言记录
+                                    </h4>
+                                    <select
+                                        className="bg-slate-800 text-slate-300 text-xs rounded border border-slate-700 px-2 py-1 outline-none focus:border-violet-500"
+                                        onChange={(e) => {
+                                            // Handle filter change (Local state needed, but inline for now I need to declare state in component)
+                                            // Since I can't add state inside this conditional render block easily without remounting, 
+                                            // I should probably add state to the main component.
+                                            // For now, let's assume I added `speechFilterDay` state to GameInterface.
+                                            // I will add it using `useState` in the main body.
+                                            setSpeechFilterDay(e.target.value);
+                                        }}
+                                        value={speechFilterDay}
+                                    >
+                                        <option value="ALL">全部环节</option>
+                                        {Array.from(new Set(gameState.logs.filter(l => l.sourcePlayerId === selectedPlayerId && l.type === 'SPEECH').map(l => l.day)))
+                                            .sort((a, b) => a - b)
+                                            .map(d => (
+                                                <option key={d} value={d.toString()}>第 {d} 天</option>
+                                            ))
+                                        }
+                                    </select>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                                    {gameState.logs
+                                        .filter(l => l.sourcePlayerId === selectedPlayerId && l.type === 'SPEECH')
+                                        .filter(l => speechFilterDay === 'ALL' || l.day === parseInt(speechFilterDay))
+                                        .sort((a, b) => b.timestamp - a.timestamp) // Newest first
+                                        .map(log => (
+                                            <div key={log.id} className="bg-slate-800/80 p-3 rounded-lg border border-slate-700 group hover:border-slate-600 transition-colors">
+                                                <div className="flex justify-between items-center mb-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[10px] text-slate-500 px-1.5 py-0.5 bg-slate-900 rounded border border-slate-800">
+                                                            第{log.day}天 - {PHASE_NAMES[log.phase]}
+                                                        </span>
+                                                        {log.originalMessage && (
+                                                            <span className="text-[10px] text-amber-500/50 italic px-1" title="此条目已修改">
+                                                                (已编辑)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[10px] text-slate-600">
+                                                            {new Date(log.timestamp).toLocaleTimeString()}
+                                                        </span>
+
+                                                        {/* Restore Button (Visible if original exists and NOT editing, AND content is different) */}
+                                                        {log.originalMessage && log.message !== log.originalMessage && editingLogId !== log.id && (
+                                                            <button
+                                                                onClick={() => {
+                                                                    if (confirmingRestoreId === log.id) {
+                                                                        gameState.updateLog(log.id, log.originalMessage!);
+                                                                        setConfirmingRestoreId(null);
+                                                                    } else {
+                                                                        setConfirmingRestoreId(log.id);
+                                                                    }
+                                                                }}
+                                                                onMouseLeave={() => setConfirmingRestoreId(null)}
+                                                                className={clsx(
+                                                                    "opacity-0 group-hover:opacity-100 px-2 py-0.5 text-[10px] rounded transition-all flex items-center gap-1",
+                                                                    confirmingRestoreId === log.id
+                                                                        ? "opacity-100 bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/50"
+                                                                        : "bg-slate-700/50 text-slate-400 hover:text-amber-400 hover:bg-slate-700"
+                                                                )}
+                                                                title={confirmingRestoreId === log.id ? "点击确认还原" : "还原原始语音"}
+                                                            >
+                                                                <RefreshCw size={10} className={confirmingRestoreId === log.id ? "animate-spin" : ""} />
+                                                                {confirmingRestoreId === log.id ? "确认?" : "还原"}
+                                                            </button>
+                                                        )}
+
+                                                        {/* Edit Button (Visible on Hover or if Editing) */}
+                                                        {editingLogId !== log.id && (
+                                                            <button
+                                                                onClick={() => {
+                                                                    setEditingLogId(log.id);
+                                                                    setEditText(log.message);
+                                                                    setConfirmingRestoreId(null);
+                                                                }}
+                                                                className="opacity-0 group-hover:opacity-100 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-violet-600 text-slate-300 hover:text-white rounded transition-all"
+                                                            >
+                                                                编辑
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                {editingLogId === log.id ? (
+                                                    <div className="animate-in fade-in duration-200">
+                                                        <textarea
+                                                            value={editText}
+                                                            onChange={(e) => setEditText(e.target.value)}
+                                                            className="w-full bg-slate-900 text-slate-200 text-sm p-3 rounded border border-violet-500/50 outline-none focus:ring-1 focus:ring-violet-500 min-h-[300px] leading-relaxed mb-3 font-mono resize-y"
+                                                            placeholder="输入修改后的发言内容..."
+                                                            autoFocus
+                                                        />
+                                                        <div className="flex justify-end gap-2 text-xs items-center">
+                                                            <button
+                                                                onClick={() => setEditingLogId(null)}
+                                                                className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 transition-colors border border-slate-700"
+                                                            >
+                                                                取消
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    gameState.updateLog(log.id, editText);
+                                                                    setEditingLogId(null);
+                                                                }}
+                                                                className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 rounded text-white font-bold transition-colors shadow-lg shadow-violet-900/20"
+                                                            >
+                                                                保存
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
+                                                        {log.message}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ))
+                                    }
+                                    {gameState.logs.filter(l => l.sourcePlayerId === selectedPlayerId && l.type === 'SPEECH').length === 0 && (
+                                        <div className="text-center text-slate-500 py-8 text-sm">
+                                            暂无发言记录
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            )}
+            )
+            }
 
             {/* Microphone Permission Request Modal */}
-            {showPermissionPrompt && micPermission !== 'granted' && (
-                <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in">
-                    <div className="bg-slate-900 border-2 border-violet-600/50 rounded-2xl p-8 max-w-md mx-4 shadow-2xl animate-in zoom-in-95 duration-300">
-                        <div className="flex items-center gap-3 mb-4">
-                            <div className="w-12 h-12 bg-violet-600/20 rounded-full flex items-center justify-center">
-                                <Mic className="text-violet-400" size={24} />
+            {
+                showPermissionPrompt && micPermission !== 'granted' && (
+                    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in">
+                        <div className="bg-slate-900 border-2 border-violet-600/50 rounded-2xl p-8 max-w-md mx-4 shadow-2xl animate-in zoom-in-95 duration-300">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="w-12 h-12 bg-violet-600/20 rounded-full flex items-center justify-center">
+                                    <Mic className="text-violet-400" size={24} />
+                                </div>
+                                <h3 className="text-xl font-bold text-white">需要麦克风权限</h3>
                             </div>
-                            <h3 className="text-xl font-bold text-white">需要麦克风权限</h3>
-                        </div>
 
-                        <p className="text-slate-300 mb-6 leading-relaxed">
-                            为了使用语音识别功能，应用需要访问您的麦克风。
-                            {micPermission === 'denied' && (
-                                <span className="block mt-2 text-red-400 text-sm">
-                                    ⚠️ 您之前拒绝了麦克风权限，请在浏览器设置中手动允许。
-                                </span>
+                            <p className="text-slate-300 mb-6 leading-relaxed">
+                                为了使用语音识别功能，应用需要访问您的麦克风。
+                                {micPermission === 'denied' && (
+                                    <span className="block mt-2 text-red-400 text-sm">
+                                        ⚠️ 您之前拒绝了麦克风权限，请在浏览器设置中手动允许。
+                                    </span>
+                                )}
+                            </p>
+
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={handleRequestPermission}
+                                    className="flex-1 bg-violet-600 hover:bg-violet-700 text-white px-6 py-3 rounded-lg font-bold transition-colors flex items-center justify-center gap-2"
+                                    disabled={micPermission === 'denied'}
+                                >
+                                    <Mic size={18} />
+                                    {micPermission === 'denied' ? '已拒绝' : '允许麦克风'}
+                                </button>
+                                <button
+                                    onClick={() => setShowPermissionPrompt(false)}
+                                    className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-bold transition-colors"
+                                >
+                                    稍后
+                                </button>
+                            </div>
+
+                            {micPermission === 'unsupported' && (
+                                <div className="mt-4 p-3 bg-red-900/20 border border-red-600/30 rounded-lg text-red-400 text-sm">
+                                    ⚠️ 您的浏览器不支持麦克风访问功能
+                                </div>
                             )}
-                        </p>
-
-                        <div className="flex gap-3">
-                            <button
-                                onClick={handleRequestPermission}
-                                className="flex-1 bg-violet-600 hover:bg-violet-700 text-white px-6 py-3 rounded-lg font-bold transition-colors flex items-center justify-center gap-2"
-                                disabled={micPermission === 'denied'}
-                            >
-                                <Mic size={18} />
-                                {micPermission === 'denied' ? '已拒绝' : '允许麦克风'}
-                            </button>
-                            <button
-                                onClick={() => setShowPermissionPrompt(false)}
-                                className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg font-bold transition-colors"
-                            >
-                                稍后
-                            </button>
                         </div>
-
-                        {micPermission === 'unsupported' && (
-                            <div className="mt-4 p-3 bg-red-900/20 border border-red-600/30 rounded-lg text-red-400 text-sm">
-                                ⚠️ 您的浏览器不支持麦克风访问功能
-                            </div>
-                        )}
                     </div>
-                </div>
-            )}
+                )
+            }
         </div >
     );
 }

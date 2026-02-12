@@ -11,6 +11,7 @@ declare global {
             voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
             onVoskResult: (callback: (data: VoskResult) => void) => void;
             offVoskResult: () => void;
+            voskFlush?: () => Promise<{ success: boolean; error?: string }>;
             getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
         }
     }
@@ -98,6 +99,106 @@ const initAudioContext = async () => {
     return audioContext;
 };
 
+// Module-level callbacks & Streams
+let currentOnResult: ((text: string, isFinal: boolean) => void) | null = null;
+let currentOnAudioLevel: ((level: number) => void) | null = null;
+let micStream: MediaStream | null = null;
+let sysStream: MediaStream | null = null;
+
+const onWorkletMessage = (event: MessageEvent) => {
+    const inputData = event.data;
+
+    // 1. Audio Level
+    if (currentOnAudioLevel) {
+        let sum = 0;
+        const step = 32;
+        for (let i = 0; i < inputData.length; i += step) {
+            sum += inputData[i] * inputData[i];
+        }
+        const rms = Math.sqrt(sum / (inputData.length / step));
+        currentOnAudioLevel(Math.min(100, Math.round(rms * 400)));
+    }
+
+    // 2. Process
+    const buffer = new Int16Array(inputData.length);
+    for (let i = 0; i < inputData.length; i++) {
+        let s = Math.max(-1, Math.min(1, inputData[i]));
+        buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    if (buffer.byteLength > 0) {
+        window.electronAPI?.voskProcessAudio(buffer);
+    }
+};
+
+export const prepareAudioEngine = async () => {
+    try {
+        if (!window.electronAPI?.voskInit) return;
+
+        // 1. Init Sidecar
+        if (!isVoskInitialized) {
+            const init = await window.electronAPI.voskInit();
+            if (!init.success) throw new Error(init.error);
+            useGameStore.getState().setAsrState({
+                type: init.usingCloud ? 'CLOUD' : 'LOCAL',
+                model: init.model || 'unknown',
+                status: 'READY'
+            });
+            isVoskInitialized = true;
+        }
+
+        // 2. Init Context
+        await initAudioContext();
+
+        // 3. Pre-warm Microphone (Default)
+        if (!micStream || !micStream.active) {
+            micStream = await navigator.mediaDevices.getUserMedia({
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                video: false
+            });
+        }
+
+    } catch (e) {
+        console.error('[SidecarVosk] Preparation Error:', e);
+    }
+};
+
+// Helper: Get System Audio Stream
+const getSystemAudioStream = async (): Promise<MediaStream> => {
+    if (sysStream && sysStream.active) return sysStream;
+
+    try {
+        const result = await window.electronAPI!.getDesktopSources();
+        if (!result.success || !result.sources || result.sources.length === 0) {
+            throw new Error("No screen sources found");
+        }
+
+        const source = result.sources[0]; // Primary Screen
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                mandatory: {
+                    chromeMediaSource: 'desktop',
+                    chromeMediaSourceId: source.id
+                }
+            } as any,
+            video: {
+                mandatory: {
+                    chromeMediaSource: 'desktop',
+                    chromeMediaSourceId: source.id
+                }
+            } as any
+        });
+
+        stream.getVideoTracks().forEach(track => track.stop());
+        sysStream = stream;
+        return stream;
+    } catch (e: any) {
+        console.error("Failed to get system audio:", e);
+        throw e;
+    }
+};
+
 export const startVoskRecording = async (
     onResult: (text: string, isFinal: boolean) => void,
     onError: (err: any) => void,
@@ -105,96 +206,59 @@ export const startVoskRecording = async (
     sourceType: 'MICROPHONE' | 'SYSTEM' = 'MICROPHONE'
 ) => {
     try {
-        if (!window.electronAPI?.voskInit) {
-            throw new Error("Native Vosk API not available");
+        currentOnResult = onResult;
+        currentOnAudioLevel = onAudioLevel || null;
+
+        if (!window.electronAPI?.voskInit) throw new Error("Native API missing");
+
+        await prepareAudioEngine();
+
+        if (!audioContext) throw new Error("AudioContext Init Failed");
+
+        // SELECT SOURCE
+        let targetStream: MediaStream | null = null;
+
+        if (sourceType === 'SYSTEM') {
+            targetStream = await getSystemAudioStream();
+        } else {
+            // Microphone (ensure active)
+            if (!micStream || !micStream.active) {
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                    video: false
+                });
+            }
+            targetStream = micStream;
         }
 
-        // 1. Initialize Sidecar (Once)
-        if (!isVoskInitialized) {
-            const init = await window.electronAPI.voskInit();
-            if (!init.success) {
-                throw new Error(`Vosk Sidecar Init Failed: ${init.error}`);
-            }
-            if (init.usingCloud) {
-                console.log('%c[ASR] Using Alibaba Cloud Qwen-ASR', 'color: green; font-weight: bold;');
-            } else {
-                console.log('[ASR] Using Local Vosk Model');
-            }
-            // Sync to Store
-            useGameStore.getState().setAsrState({
-                type: init.usingCloud ? 'CLOUD' : 'LOCAL',
-                model: init.model || (init.usingCloud ? 'qwen3-asr-flash-realtime' : 'vosk-model-small-cn-0.22'),
-                status: 'READY'
-            });
-            isVoskInitialized = true;
+        // SWAP SOURCE NODE
+        if (source) {
+            source.disconnect();
+            source = null;
         }
 
-        // 2. Pre-warm AudioContext (Parallel with Stream Request)
-        const contextPromise = initAudioContext();
+        source = audioContext.createMediaStreamSource(targetStream);
 
-        // 3. Setup Listener
+        if (!workletNode) {
+            workletNode = new AudioWorkletNode(audioContext, 'vosk-audio-processor');
+            workletNode.port.onmessage = onWorkletMessage;
+            workletNode.connect(audioContext.destination);
+        }
+
+        source.connect(workletNode);
+
+        // Setup Listener
+        window.electronAPI.offVoskResult();
         window.electronAPI.onVoskResult((msg: VoskResult) => {
             if (msg.type === 'result' && msg.data.text) {
-                onResult(msg.data.text, true);
-            } else if (msg.type === 'partial' && msg.data.partial) {
-                // onResult(msg.data.partial, false);
+                currentOnResult?.(msg.data.text, true);
             }
         });
 
-        // 4. Get Stream
-        console.log(`[SidecarVosk] Requesting Source: ${sourceType}`);
-        if (sourceType === 'SYSTEM') {
-            recordingStream = await getSystemAudioStream();
-        } else {
-            recordingStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true
-                },
-                video: false
-            });
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
         }
-        console.log(`[SidecarVosk] Stream Granted: ${recordingStream.id}`);
-
-        // 5. Ensure Context is Ready
-        await contextPromise;
-        if (!audioContext) throw new Error("AudioContext failed to initialize");
-
-        // 6. Connect Nodes
-        source = audioContext.createMediaStreamSource(recordingStream);
-        workletNode = new AudioWorkletNode(audioContext, 'vosk-audio-processor');
-
-        workletNode.port.onmessage = (event) => {
-            const inputData = event.data; // Float32Array (Already 16kHz due to AudioContext setting)
-
-            // 1. Audio Level
-            if (onAudioLevel) {
-                let sum = 0;
-                const step = 32;
-                for (let i = 0; i < inputData.length; i += step) {
-                    sum += inputData[i] * inputData[i];
-                }
-                const rms = Math.sqrt(sum / (inputData.length / step));
-                onAudioLevel(Math.min(100, Math.round(rms * 400)));
-            }
-
-            // 2. Convert Float32 to Int16 (No Downsampling needed)
-            const buffer = new Int16Array(inputData.length);
-            for (let i = 0; i < inputData.length; i++) {
-                let s = Math.max(-1, Math.min(1, inputData[i]));
-                buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-
-            if (buffer.byteLength > 0) {
-                window.electronAPI?.voskProcessAudio(buffer);
-            }
-        };
-
-        source.connect(workletNode);
-        workletNode.connect(audioContext.destination);
-
-        console.log('[SidecarVosk] Recording started with Native 16kHz');
+        console.log(`[SidecarVosk] Recording Started (${sourceType})`);
 
     } catch (e: any) {
         console.error('[SidecarVosk] Start Error:', e);
@@ -202,71 +266,37 @@ export const startVoskRecording = async (
     }
 };
 
-// Helper: Get System Audio Stream via Electron desktopCapturer
-async function getSystemAudioStream(): Promise<MediaStream> {
-    if (!window.electronAPI?.getDesktopSources) {
-        throw new Error("System Audio capture not supported in this environment");
+export const stopVoskRecording = async (waitForFlush = true) => {
+    // 1. Commit/Flush Backend
+    if (window.electronAPI?.voskFlush && waitForFlush) {
+        console.log('[SidecarVosk] Flushing buffer...');
+        window.electronAPI.voskFlush().catch(e => console.error(e));
+        await new Promise(resolve => setTimeout(resolve, 600));
     }
 
-    const result = await window.electronAPI.getDesktopSources();
-    if (!result.success || !result.sources || result.sources.length === 0) {
-        throw new Error("No desktop sources found");
-    }
-
-    // Usually we pick the first screen "Entire Screen"
-    // TODO: If needed, could filter for specific windows, but for game voice, screen audio is best.
-    const sourceId = result.sources[0].id;
-    console.log('[SidecarVosk] Capturing System Audio from:', sourceId, result.sources[0].name);
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-            mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: sourceId
-            }
-        } as any,
-        video: {
-            mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: sourceId
-            }
-        } as any
-    });
-
-    if (stream.getAudioTracks().length === 0) {
-        throw new Error("No audio track found in system capture. Please check system permissions.");
-    }
-
-    return stream;
-}
-
-export const stopVoskRecording = async () => {
-    if (workletNode) {
-        workletNode.disconnect();
-        workletNode.port.close();
-        workletNode = null;
-    }
-    if (source) {
-        source.disconnect();
-        source = null;
-    }
-    if (recordingStream) {
-        recordingStream.getTracks().forEach(track => track.stop());
-        recordingStream = null;
-    }
-
-    // Suspend context to save CPU, but don't close it
+    // 2. Suspend Audio
     if (audioContext && audioContext.state === 'running') {
         try {
             await audioContext.suspend();
             console.log('[SidecarVosk] AudioContext suspended');
         } catch (e) {
-            console.warn('[SidecarVosk] Failed to suspend context:', e);
+            console.warn('[SidecarVosk] Suspend Error:', e);
         }
     }
+
+    // 3. Cleanup
+    currentOnResult = null;
+    currentOnAudioLevel = null;
 
     if (window.electronAPI?.offVoskResult) {
         window.electronAPI.offVoskResult();
     }
-    console.log('[SidecarVosk] Recording stopped (Context cached)');
+
+    // Note: We keeping sysStream/micStream active for reuse, 
+    // or we could stop sysStream here if we want to stop the "Sharing" indicator.
+    // For System Audio, it's polite to stop it when not recording to remove the banner.
+    if (sysStream) {
+        sysStream.getTracks().forEach(track => track.stop());
+        sysStream = null;
+    }
 };

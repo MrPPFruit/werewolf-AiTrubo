@@ -45,8 +45,9 @@ function createWindow() {
     mainWindow.loadURL(startUrl);
 
     // Open DevTools in development
+    // Open DevTools in development
     if (isDev) {
-        mainWindow.webContents.openDevTools();
+        // mainWindow.webContents.openDevTools();
     }
 
     mainWindow.on('closed', () => {
@@ -68,10 +69,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit();
-    }
-    // Kill sidecar on exit
-    if (voiceProcess) {
-        voiceProcess.kill();
     }
 });
 
@@ -116,126 +113,57 @@ ipcMain.handle('start-recording', async (event, options) => {
     }
 });
 
-// Sidecar Voice Server (Node.js Child Process)
-let voiceProcess = null;
-
-const initVoiceServer = async () => {
-    if (voiceProcess) return true;
-
-    const { spawn } = require('child_process');
-
-    // Path to model
-    const rawPath = isDev
-        ? path.join(__dirname, '../public/models/vosk-model-small-cn-0.22')
-        : path.join(process.resourcesPath, 'public/models/vosk-model-small-cn-0.22');
-
-    // Fix Windows paths (just in case Node args act up, though usually standard paths work)
-    const modelPath = rawPath.replace(/\\/g, '/');
-
-    // Path to server script
-    const serverScript = isDev
-        ? path.join(__dirname, 'voice-server.js')
-        : path.join(process.resourcesPath, 'electron/voice-server.js'); // Assumption for Prod
-
-    if (!require('fs').existsSync(serverScript)) {
-        console.error('[VoiceClient] Server script not found:', serverScript);
-        return false;
-    }
-
-    console.log('[VoiceClient] Spawning Sidecar:', serverScript);
-    console.log('[VoiceClient] Model:', modelPath);
-
-    // Spawn "node" (System Node)
-    // stdio: ['pipe', 'pipe', 'pipe']
-    voiceProcess = spawn('node', [serverScript, modelPath]);
-
-    voiceProcess.stdout.on('data', (data) => {
-        // Buffer to string. Can contain multiple JSON lines.
-        const str = data.toString();
-        const lines = str.split('\n');
-
-        for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-                const msg = JSON.parse(line);
-                if (msg.type === 'ready') {
-                    console.log('[VoiceClient] Sidecar Ready');
-                } else if (msg.type === 'result' || msg.type === 'partial') {
-                    // Send to Renderer
-                    if (mainWindow) {
-                        mainWindow.webContents.send('vosk-result', msg);
-                    }
-                }
-            } catch (e) {
-                // Partial JSON or log message
-                console.log('[VoiceServer Log]:', line);
-            }
-        }
-    });
-
-    voiceProcess.stderr.on('data', (data) => {
-        console.error(`[VoiceServer Error]: ${data}`);
-    });
-
-    voiceProcess.on('close', (code) => {
-        console.log(`[VoiceServer] Exited with code ${code}`);
-        voiceProcess = null;
-    });
-
-    return true;
-};
-
 // IPC: Init
 ipcMain.handle('vosk-init', async () => {
     try {
-        // Initialize DashScope if configured
         console.log('[Main] Checking DashScope Config. Key exists:', !!DASHSCOPE_API_KEY, 'Model:', require('./config').DASHSCOPE_MODEL);
-        if (DASHSCOPE_API_KEY) {
-            console.log('[Main] Initializing DashScope Client...');
-            dashClient = new DashScopeClient(
-                (text, isFinal) => {
-                    if (mainWindow) {
-                        mainWindow.webContents.send('vosk-result', {
-                            type: isFinal ? 'result' : 'partial',
-                            data: isFinal ? { text } : { partial: text }
-                        });
-                    }
-                },
-                (err) => {
-                    console.error('[DashScope] Error:', err);
-                    if (mainWindow) {
-                        // Optionally send error to frontend
-                    }
-                }
-            );
-            dashClient.start();
+
+        if (!DASHSCOPE_API_KEY) {
+            console.error('[Main] No DashScope API Key found. ASR will not work.');
+            return { success: false, error: "未配置云端语音识别 API Key" };
         }
 
-        // Also init local Vosk (as backup or just parallel?)
-        // If DashScope is used, maybe we don't need Vosk running?
-        // But for now, let's keep Vosk initialization logic but maybe skip if DashScope is primary?
-        // Actually, let's run both or just return success if DashScope is ready.
-        // Let's Init Vosk anyway for fallback.
-        const success = await initVoiceServer();
+        if (dashClient) {
+            dashClient.stop();
+        }
+
+        console.log('[Main] Initializing DashScope Client...');
+        dashClient = new DashScopeClient(
+            (text, isFinal) => {
+                if (mainWindow) {
+                    mainWindow.webContents.send('vosk-result', {
+                        type: isFinal ? 'result' : 'partial',
+                        data: isFinal ? { text } : { partial: text }
+                    });
+                }
+            },
+            (err) => {
+                console.error('[DashScope] Error:', err);
+                if (mainWindow) {
+                    // Optionally send error to frontend
+                }
+            }
+        );
+        dashClient.start();
+
         // Return model info
         const { DASHSCOPE_MODEL } = require('./config');
         return {
-            success,
-            usingCloud: !!DASHSCOPE_API_KEY,
-            model: DASHSCOPE_API_KEY ? (DASHSCOPE_MODEL || 'qwen3-asr-flash-realtime') : 'vosk-model-small-cn-0.22'
+            success: true,
+            usingCloud: true,
+            model: DASHSCOPE_MODEL || 'qwen3-asr-flash-realtime'
         };
     } catch (e) {
         return { success: false, error: e.message };
     }
 });
 
-// IPC: Process Audio (Stream to Sidecar or Cloud)
+// IPC: Process Audio (Stream to Cloud Only)
 ipcMain.on('vosk-process-audio', (event, data) => {
-    // 1. Cloud ASR (Priority)
+    // Cloud ASR Only
     if (dashClient && dashClient.isReady) {
         try {
             let buffer;
-            // Handle various buffer types from IPC
             if (Buffer.isBuffer(data)) {
                 buffer = data;
             } else if (data.buffer) {
@@ -244,31 +172,24 @@ ipcMain.on('vosk-process-audio', (event, data) => {
                 buffer = Buffer.from(data);
             }
             dashClient.sendAudio(buffer);
-            return;
         } catch (e) {
             console.error('[DashScope] Write Error:', e);
-            // Fallthrough to local?
         }
     }
+});
 
-    // 2. Local Vosk (Fallback)
-    if (!voiceProcess || !voiceProcess.stdin) return;
-    try {
-        let buffer;
-        if (Buffer.isBuffer(data)) {
-            buffer = data;
-        } else if (data.buffer) {
-            buffer = Buffer.from(data.buffer, data.byteOffset || 0, data.byteLength);
-        } else {
-            buffer = Buffer.from(data);
+// IPC: Flush Audio (Force finalization)
+ipcMain.handle('vosk-flush', async () => {
+    if (dashClient && dashClient.isReady) {
+        try {
+            dashClient.flush();
+            return { success: true };
+        } catch (e) {
+            console.error('[DashScope] Flush Error:', e);
+            return { success: false, error: e.message };
         }
-
-        voiceProcess.stdin.write(buffer, (err) => {
-            if (err) console.error('[VoiceClient] Write Error:', err);
-        });
-    } catch (e) {
-        console.error('Sidecar Write Exception:', e);
     }
+    return { success: false, error: "Client not ready" };
 });
 
 ipcMain.handle('stop-recording', async () => {
@@ -281,6 +202,24 @@ ipcMain.handle('stop-recording', async () => {
     } catch (error) {
         console.error('Failed to stop recording:', error);
         return { success: false, error: error.message };
+    }
+});
+
+// System Audio Capture Helpers
+ipcMain.handle('get-desktop-sources', async () => {
+    try {
+        const { desktopCapturer } = require('electron');
+        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        return {
+            success: true,
+            sources: sources.map(s => ({
+                id: s.id,
+                name: s.name
+            }))
+        };
+    } catch (e) {
+        console.error('Failed to get desktop sources:', e);
+        return { success: false, error: e.message };
     }
 });
 

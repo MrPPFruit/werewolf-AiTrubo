@@ -8,6 +8,7 @@ interface GameStore extends GameState {
     setPhase: (phase: GamePhase) => void;
     updatePlayer: (playerId: string, updates: Partial<Player>) => void;
     addLog: (type: LogType, message: string, sourceId?: string, targetId?: string) => void;
+    updateLog: (id: string, message: string) => void;
     killPlayer: (playerId: string) => void;
     revivePlayer: (playerId: string) => void;
     setSheriff: (playerId: string | null) => void;
@@ -49,6 +50,11 @@ const initialState: GameState = {
     relations: [],
     myPlayerId: null,
     sheriffId: null,
+    asrState: { // Default ASR State
+        type: 'CLOUD',
+        model: 'Loading...',
+        status: 'READY'
+    },
     createdAt: 0,
 };
 
@@ -101,6 +107,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 {
                     id: crypto.randomUUID(),
                     timestamp: Date.now(),
+                    day: state.day,
                     phase: state.phase,
                     type,
                     message,
@@ -109,6 +116,23 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 },
             ],
         })),
+
+    updateLog: (id, newMessage) => {
+        set(state => ({
+            logs: state.logs.map(log => {
+                if (log.id === id) {
+                    return {
+                        ...log,
+                        message: newMessage,
+                        // If originalMessage is slightly different or undefined, set it.
+                        // We only set originalMessage if it's not already set, preserving the TRUE original.
+                        originalMessage: log.originalMessage || log.message
+                    };
+                }
+                return log;
+            })
+        }));
+    },
 
     killPlayer: (playerId) => {
         get().updatePlayer(playerId, { status: 'DEAD' });
@@ -286,9 +310,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
     setAsrState: (updates) => {
         set(state => ({
             asrState: {
-                type: 'LOCAL',
-                model: 'vosk-model-small-cn-0.22',
-                status: 'READY',
                 ...state.asrState,
                 ...updates
             }

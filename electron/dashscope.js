@@ -41,7 +41,8 @@ class DashScopeClient {
                         input_audio_format: "pcm", // Fixed: "pcm" instead of "pcm16"
                         input_audio_transcription: {
                             model: model,
-                            language: "zh"  // Explicitly set Chinese
+                            language: "zh",
+                            keywords: ["预言家", "狼人", "女巫", "猎人", "守卫", "白痴", "狼王", "查杀", "金水", "银水", "悍跳", "倒钩", "冲票", "自爆", "警徽流", "上警", "退水"]
                         },
                         turn_detection: {
                             type: "server_vad",
@@ -139,6 +140,19 @@ class DashScopeClient {
             this.ws.send(JSON.stringify(event));
         } catch (e) {
             console.error('[DashScope] Send Error:', e);
+        }
+    }
+
+    flush() {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        try {
+            console.log('[DashScope] Sending input_audio_buffer.commit...');
+            const event = {
+                type: "input_audio_buffer.commit"
+            };
+            this.ws.send(JSON.stringify(event));
+        } catch (e) {
+            console.error('[DashScope] Flush Error:', e);
         }
     }
 

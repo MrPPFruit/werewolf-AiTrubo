@@ -62,7 +62,8 @@ ws.on('open', () => {
             input_audio_format: "pcm",
             input_audio_transcription: {
                 model: model,
-                language: "zh"
+                language: "zh",
+                keywords: ["预言家", "狼人", "女巫", "猎人", "守卫", "白痴", "狼王", "查杀", "金水", "银水", "悍跳", "倒钩", "冲票", "自爆", "警徽流", "上警", "退水"]
             },
             turn_detection: {
                 type: "server_vad"

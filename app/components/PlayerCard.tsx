@@ -8,7 +8,6 @@ interface PlayerCardProps {
     player: Player;
     isMe: boolean;
     onClick: () => void;
-    latestSpeech?: string;
     onQuickRecord?: (e: React.MouseEvent) => void;
     onToggleCampaign?: (e: React.MouseEvent) => void;
     onQuitElection?: (e: React.MouseEvent) => void;
@@ -17,7 +16,7 @@ interface PlayerCardProps {
     isMixbloodTarget?: boolean;
 }
 
-export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget }: PlayerCardProps) {
+export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget }: PlayerCardProps) {
     const isDead = player.status === 'DEAD' || player.status === 'EXILED';
 
     // Sort probabilities > 10%
@@ -230,16 +229,8 @@ export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuic
                 </div>
             </div>
 
-            {/* Speech Overlay (Centered) */}
-            {
-                latestSpeech && !isDead && (
-                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90%] z-20 animate-in fade-in zoom-in-95 duration-300 pointer-events-none">
-                        <div className="bg-black/70 backdrop-blur-md text-slate-100 text-xs py-2 px-3 rounded-xl border border-white/10 shadow-2xl text-center leading-relaxed">
-                            &ldquo;{latestSpeech}&rdquo;
-                        </div>
-                    </div>
-                )
-            }
+            {/* Speech Overlay REMOVED */}
+            {/* latestSpeech prop is no longer used for display */}
 
             {/* Hitbox overlay for status effect */}
             {

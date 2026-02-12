@@ -49,9 +49,11 @@ export type LogType = 'SYSTEM' | 'VOTE' | 'DEATH' | 'SPEECH' | 'ACTION';
 export interface GameLog {
   id: string;
   timestamp: number;
+  day: number; // Game day
   phase: GamePhase;
   type: LogType;
   message: string;
+  originalMessage?: string; // For restoring edited logs
   sourcePlayerId?: string;
   targetPlayerId?: string;
 }
@@ -86,5 +88,6 @@ export interface GameState {
   logs: GameLog[];
   myPlayerId: string | null; // The user's own player ID
   sheriffId: string | null;
+  asrState: ASRState; // Current ASR status
   createdAt: number;
 }

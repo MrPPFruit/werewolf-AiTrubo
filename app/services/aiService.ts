@@ -1,5 +1,6 @@
 import { GameState, Role } from "@/app/types/game";
 import { startVoskRecording, stopVoskRecording } from './voskService';
+import dictionary from '@/app/config/dictionary.json';
 
 // Type declaration for Electron API
 interface VoskResult {
@@ -21,6 +22,7 @@ declare global {
             voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
             onVoskResult: (callback: (data: VoskResult) => void) => void;
             offVoskResult: () => void;
+            voskFlush?: () => Promise<{ success: boolean; error?: string }>;
             getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
         }
     }
@@ -222,33 +224,39 @@ export const startSpeechRecognition = async (
     }
 };
 
-export const stopSpeechRecognition = () => {
-    // Stop Electron recording if available
-    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
-        window.electronAPI.stopRecording();
-        stopVoskRecording();
-    } else {
-        stopVoskRecording(); // Just in case it was running
-    }
-
+export const stopSpeechRecognition = async () => {
     // Stop Web Speech API
     if (recognition) {
         recognition.stop();
         recognition = null;
     }
 
-    // Clean up audio monitoring
+    // Clean up audio monitoring interval
     if (audioLevelInterval) {
         clearInterval(audioLevelInterval);
         audioLevelInterval = null;
     }
 
+    // Stop Vosk (Electron)
+    if (typeof window !== 'undefined' && window.electronAPI?.isElectron) {
+        window.electronAPI.stopRecording(); // Stop Electron's desktopCapturer or getUserMedia
+        // Await the flush delay for Vosk to process any remaining audio
+        await stopVoskRecording(true);
+    } else {
+        // If not in Electron, or if Vosk was used in a browser context (e.g., for testing),
+        // ensure it's stopped. The `true` argument for flush delay is only relevant if it was actively recording.
+        stopVoskRecording();
+    }
+
+    // Clean up Web Audio API resources
     if (microphone) {
         microphone.disconnect();
         microphone = null;
     }
 
-    if (audioContext) {
+    if (audioContext && audioContext.state === 'running') {
+        // Only close audioContext if it's running and not managed by an external service (like Vosk, if it were to manage its own context)
+        // For Web Speech API path, we explicitly created and manage it here.
         audioContext.close();
         audioContext = null;
     }
@@ -268,24 +276,7 @@ export const transcribeAudio = async (blob: Blob): Promise<string> => {
  * In a real scenario, this would call an LLM API.
  */
 export const correctTextWithAI = async (text: string): Promise<string> => {
-    const corrections: Record<string, string> = {
-        "寓言家": "预言家",
-        "雨颜家": "预言家",
-        "郎人": "狼人",
-        "浪人": "狼人",
-        "怒屋": "女巫",
-        "吕武": "女巫",
-        "猎忍": "猎人",
-        "列人": "猎人",
-        "首位": "守卫",
-        "手卫": "守卫",
-        "存民": "村民",
-        "村名": "村民",
-        "京水": "金水",
-        "查沙": "查杀",
-        "汉跳": "悍跳",
-        "汉条": "悍跳",
-    };
+    const corrections: Record<string, string> = dictionary;
 
     let corrected = text;
     for (const [key, value] of Object.entries(corrections)) {
