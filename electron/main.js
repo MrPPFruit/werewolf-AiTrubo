@@ -3,6 +3,7 @@ const path = require('path');
 const isDev = require('electron-is-dev');
 const DashScopeClient = require('./dashscope');
 const { DASHSCOPE_API_KEY } = require('./config');
+const logger = require('./logger');
 
 let mainWindow;
 let audioRecorder = null;
@@ -114,10 +115,14 @@ ipcMain.handle('vosk-set-mute', async (event, mute) => {
 // IPC: Init
 ipcMain.handle('vosk-init', async () => {
     try {
-        console.log('[Main] Checking DashScope Config. Key exists:', !!DASHSCOPE_API_KEY, 'Model:', require('./config').DASHSCOPE_MODEL);
+        // Replace console.log with logger.info and console.error with logger.error in various places
+        // This is a global replace strategy for the file. 
+
+        // 1. vosk-init
+        logger.info(`[Main] Init DashScope. Key Present: ${!!DASHSCOPE_API_KEY}, Model: ${require('./config').DASHSCOPE_MODEL}`);
 
         if (!DASHSCOPE_API_KEY) {
-            console.error('[Main] No DashScope API Key found. ASR will not work.');
+            logger.error('[Main] No DashScope API Key found.');
             return { success: false, error: "未配置云端语音识别 API Key" };
         }
 
@@ -125,9 +130,7 @@ ipcMain.handle('vosk-init', async () => {
             dashClient.stop();
         }
 
-
-
-        console.log('[Main] Initializing DashScope Client...');
+        logger.info('[Main] Initializing DashScope Client...');
         dashClient = new DashScopeClient(
             (text, isFinal) => {
                 if (mainWindow && !isVoskMuted) {
@@ -138,12 +141,13 @@ ipcMain.handle('vosk-init', async () => {
                 }
             },
             (err) => {
-                console.error('[DashScope] Error:', err);
+                logger.error(`[DashScope] Error: ${err}`);
                 if (mainWindow) {
-                    // Optionally send error to frontend
+                    mainWindow.webContents.send('vosk-error', err);
                 }
             }
         );
+
         dashClient.start();
 
         // Return model info
@@ -220,6 +224,118 @@ ipcMain.handle('get-desktop-sources', async () => {
     } catch (e) {
         console.error('Failed to get desktop sources:', e);
         return { success: false, error: e.message };
+    }
+});
+
+// [CRITICAL] Enable SharedArrayBuffer for WASM (Vosk)
+// ... (existing code)
+
+// Helper for DashScope API (OpenAI Compatible)
+// Helper for DashScope API (OpenAI Compatible) - Using Electron net module for better stability
+async function callDashScope(messages, model = 'qwen-max') {
+    if (!DASHSCOPE_API_KEY) {
+        throw new Error("Missing DashScope API Key");
+    }
+
+    const { net } = require('electron');
+
+    return new Promise((resolve, reject) => {
+        const request = net.request({
+            method: 'POST',
+            url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+        });
+
+        request.setHeader('Authorization', `Bearer ${DASHSCOPE_API_KEY}`);
+        request.setHeader('Content-Type', 'application/json');
+
+        request.on('response', (response) => {
+            let body = '';
+            response.on('data', (chunk) => {
+                body += chunk.toString();
+            });
+            response.on('end', () => {
+                if (response.statusCode >= 200 && response.statusCode < 300) {
+                    try {
+                        const data = JSON.parse(body);
+                        if (data.choices && data.choices.length > 0) {
+                            resolve(data.choices[0].message.content);
+                        } else {
+                            reject(new Error(`DashScope Response Format Error: ${body}`));
+                        }
+                    } catch (e) {
+                        reject(new Error(`Failed to parse DashScope response: ${e.message}`));
+                    }
+                } else {
+                    reject(new Error(`DashScope API Error: ${response.statusCode} ${body}`));
+                }
+            });
+            response.on('error', (error) => {
+                reject(error);
+            });
+        });
+
+        request.on('error', (error) => {
+            console.error('[DashScope] Network Request Error:', error);
+            reject(error);
+        });
+
+        request.write(JSON.stringify({
+            model: model,
+            messages: messages,
+            temperature: 0.7,
+        }));
+
+        request.end();
+    });
+}
+
+// IPC: AI Game Analysis
+ipcMain.handle('analyze-game', async (event, { messages }) => {
+    try {
+        const { DASHSCOPE_LLM_MODEL } = require('./config');
+        const model = DASHSCOPE_LLM_MODEL || 'qwen-max';
+        console.log(`[Main] analyzing game with ${model}...`);
+        const result = await callDashScope(messages, model);
+        return { success: true, analysis: result };
+    } catch (error) {
+        console.error('[Main] Analysis failed:', error);
+        return { success: false, error: error.message };
+    }
+});
+
+// IPC: Speech Summarization
+ipcMain.handle('summarize-speech', async (event, { text }) => {
+    try {
+        if (!text || text.length < 10) return { success: true, summary: text };
+
+        const { DASHSCOPE_LLM_MODEL } = require('./config');
+        const model = DASHSCOPE_LLM_MODEL || 'qwen-max';
+
+        const messages = [
+            {
+                role: 'system',
+                content: `你是一个狼人杀游戏记录员。请将玩家的发言去除口语废话（如“这个”、“就是”），提炼为关键逻辑点。
+                
+                **核心任务：智能修正语音识别错误**
+                请根据狼人杀语境修正谐音错别字，例如：
+                - "鱼眼家" -> "预言家"
+                - "警辉" -> "警徽"
+                - "金水" -> "金水" (不应识别为薪水)
+                - "查杀" -> "查杀" (不应识别为茶杀)
+                - "女巫" -> "女巫"
+                - "猎人" -> "猎人"
+                
+                输出要求：保持简练，不要歪曲原意。直接输出修正后的摘要。`
+            },
+            { role: 'user', content: text }
+        ];
+
+        console.log(`[Main] Summarizing speech with ${model}...`);
+        const summary = await callDashScope(messages, model);
+        return { success: true, summary: summary };
+    } catch (error) {
+        console.error('[Main] Summarization failed:', error);
+        return { success: false, error: error.message };
     }
 });
 

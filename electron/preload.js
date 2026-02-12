@@ -34,9 +34,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('vosk-result', (_event, data) => callback(data));
     },
     offVoskResult: () => ipcRenderer.removeAllListeners('vosk-result'),
+    onVoskError: (callback) => ipcRenderer.on('vosk-error', (_event, err) => callback(err)),
 
     // Check if running in Electron
     isElectron: true,
+
+    // AI Features
+    analyzeGame: (messages) => ipcRenderer.invoke('analyze-game', { messages }),
+    summarizeSpeech: (text) => ipcRenderer.invoke('summarize-speech', { text }),
 
     // System Audio
     getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),

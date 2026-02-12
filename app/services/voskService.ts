@@ -1,23 +1,6 @@
 import { startVoskRecording as startRecording, stopVoskRecording as stopRecording } from './voskService';
 import { useGameStore } from '../store/gameStore';
 
-// Native Electron API Type Definition
-declare global {
-    interface Window {
-        electronAPI?: {
-            isElectron: boolean;
-            stopRecording: () => Promise<{ success: boolean; error?: string }>;
-            voskInit: () => Promise<{ success: boolean; error?: string; usingCloud?: boolean; model?: string }>;
-            voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
-            onVoskResult: (callback: (data: VoskResult) => void) => void;
-            offVoskResult: () => void;
-            voskFlush?: () => Promise<{ success: boolean; error?: string }>;
-            voskSetMute?: (mute: boolean) => Promise<{ success: boolean }>;
-            getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
-        }
-    }
-}
-
 interface VoskResult {
     type: 'result' | 'partial' | 'ready';
     data: {
@@ -260,6 +243,17 @@ export const startVoskRecording = async (
                 currentOnResult?.(msg.data.text, true);
             }
         });
+
+        // Listen for Backend Errors
+        if (window.electronAPI.onVoskError) {
+            window.electronAPI.onVoskError((err: any) => {
+                console.error('[SidecarVosk] Backend Error:', err);
+                // If WebSocket closed, we might want to force a re-init next time
+                isVoskInitialized = false;
+                // Pass to UI
+                onError(err);
+            });
+        }
 
         if (audioContext.state === 'suspended') {
             await audioContext.resume();

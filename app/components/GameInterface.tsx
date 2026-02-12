@@ -2,13 +2,14 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useGameStore } from '@/app/store/gameStore';
-import { RefreshCw, Mic, ChevronRight, X, Skull, HeartPulse, Crown, MessageSquare, MicOff, BrainCircuit, Shield, Crosshair, Target } from 'lucide-react';
+import { RefreshCw, Mic, ChevronRight, X, Skull, HeartPulse, Crown, MessageSquare, MicOff, BrainCircuit, Shield, Crosshair, Target, Undo, Redo } from 'lucide-react';
 import clsx from 'clsx';
 import PlayerCard from './PlayerCard';
 import GameLog from './GameLog';
 import VoteRecorder from './VoteRecorder';
 import { GamePhase } from '@/app/types/game';
-import { analyzeGameState, startSpeechRecognition, stopSpeechRecognition } from '@/app/services/aiService';
+import { analyzeGameState, startSpeechRecognition, stopSpeechRecognition, summarizeSpeech } from '@/app/services/aiService';
+
 
 const PHASE_ORDER: GamePhase[] = [
     'NIGHT_START',
@@ -16,7 +17,6 @@ const PHASE_ORDER: GamePhase[] = [
     'SEER_ACTION',
     'WITCH_ACTION',
     'HUNTER_ACTION',
-    'DAY_START',
     'ELECTION',
     'DEATH_ANNOUNCE',
     'SPEECH',
@@ -40,10 +40,27 @@ const PHASE_NAMES: Record<GamePhase, string> = {
     GAME_OVER: '游戏结束',
 };
 
+const PHASE_DESCRIPTIONS: Record<GamePhase, string> = {
+    SETUP: '配置游戏角色与板子',
+    NIGHT_START: '天黑请闭眼，所有玩家停止讨论',
+    WEREWOLF_ACTION: '狼人请睁眼，确认击杀目标',
+    SEER_ACTION: '预言家请睁眼，查验一名玩家身份',
+    WITCH_ACTION: '女巫请睁眼，使用解药或毒药',
+    HUNTER_ACTION: '猎人请睁眼，确认开枪状态',
+    DAY_START: '天亮了，竞选警长或直接发言',
+    DEATH_ANNOUNCE: '昨晚死亡情况公告',
+    ELECTION: '想要上警的玩家请举手',
+    SPEECH: '请按顺序发言，分享你的逻辑',
+    VOTE: '请投票放逐一名玩家',
+    EXILE_SPEECH: '被放逐玩家发表遗言',
+    GAME_OVER: '游戏结束，查看复盘',
+};
+
 export default function GameInterface() {
     const gameState = useGameStore();
-    const { phase, players, day, myPlayerId, resetGame, setPhase, killPlayer, revivePlayer, setSheriff, addLog, toggleTeammateMark, setPlayerMark, updateProbabilities } = gameState;
+    const { phase, players, day, myPlayerId, resetGame, setPhase, killPlayer, revivePlayer, setSheriff, addLog, updateLogSummary, toggleTeammateMark, setPlayerMark, updateProbabilities, incrementDay } = gameState;
     const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
+    const [showSheriffVote, setShowSheriffVote] = useState(false); // [NEW] Sheriff Vote Toggle
     const [isRecording, setIsRecording] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [aiAnalysis, setAiAnalysis] = useState<string>('');
@@ -69,30 +86,74 @@ export default function GameInterface() {
 
     // Track who we are recording separately from the selected player (modal)
     // This allows us to close the modal while recording continues
+    // Track who we are recording separately from the selected player (modal)
+    // This allows us to close the modal while recording continues
     const [recordingTargetId, setRecordingTargetId] = useState<string | null>(null);
     const liveTranscriptRef = useRef(''); // Ref to track latest transcript for async access
+
+    // [NEW] Edit History for Transcript
+    const [history, setHistory] = useState<string[]>(['']);
+    const [historyIndex, setHistoryIndex] = useState(0);
+    const historyIndexRef = useRef(0);
 
     // Sync ref
     useEffect(() => {
         liveTranscriptRef.current = liveTranscript;
     }, [liveTranscript]);
 
+    useEffect(() => {
+        historyIndexRef.current = historyIndex;
+    }, [historyIndex]);
+
+    // History Helpers
+    const pushHistory = (newText: string) => {
+        setHistory(prev => {
+            const truncated = prev.slice(0, historyIndexRef.current + 1);
+            return [...truncated, newText];
+        });
+        setHistoryIndex(prev => prev + 1);
+    };
+
+    const handleUndo = () => {
+        if (historyIndex > 0) {
+            const newIndex = historyIndex - 1;
+            setHistoryIndex(newIndex);
+            setLiveTranscript(history[newIndex]);
+        }
+    };
+
+    const handleRedo = () => {
+        if (historyIndex < history.length - 1) {
+            const newIndex = historyIndex + 1;
+            setHistoryIndex(newIndex);
+            setLiveTranscript(history[newIndex]);
+        }
+    };
+
     const selectedPlayer = players.find(p => p.id === selectedPlayerId);
 
     // Auto-Analyze on Phase Change
-    useEffect(() => {
-        const runAnalysis = async () => {
-            setIsAnalyzing(true);
+    const runAnalysis = async () => {
+        if (isAnalyzing) return;
+        setIsAnalyzing(true);
+        try {
             const result = await analyzeGameState(gameState);
             setAiAnalysis(result.analysis);
             setWolfProbabilities(result.probabilities);
             setWinRate(result.winRate);
             setDangerAlert(result.dangerAlert);
-            updateProbabilities(result.roleProbabilities); // Update detailed stats in store
+            updateProbabilities(result.roleProbabilities, result.playerAnalysis); // Update detailed stats & analysis in store
+        } catch (error) {
+            console.error("Analysis failed:", error);
+            setAiAnalysis("分析失败，请重试");
+        } finally {
             setIsAnalyzing(false);
-        };
+        }
+    };
+
+    useEffect(() => {
         runAnalysis();
-    }, [phase, day, players.length]); // Re-run on major changes (removed players dependency to avoid loops if players update triggers this)
+    }, [phase, day, players.length]); // Re-run on major changes
 
     // Check microphone permission AND pre-warm Audio Engine on mount
     useEffect(() => {
@@ -118,11 +179,35 @@ export default function GameInterface() {
     }, []);
 
     const handleNextPhase = () => {
+        // Special Phase Logic
+        if (phase === 'HUNTER_ACTION') {
+            // End of Night -> Start of Day
+            // Day 1: Election -> Death Announce
+            // Day N: Death Announce
+            if (day === 1) {
+                setPhase('ELECTION');
+            } else {
+                setPhase('DEATH_ANNOUNCE');
+            }
+            return;
+        }
+
+        if (phase === 'ELECTION') {
+            setPhase('DEATH_ANNOUNCE');
+            return;
+        }
+
+        if (phase === 'EXILE_SPEECH') {
+            // End of Day -> Start of Night (Next Day)
+            incrementDay();
+            setPhase('NIGHT_START');
+            return;
+        }
+
+        // Standard Sequential Handling for others
         const currentIndex = PHASE_ORDER.indexOf(phase);
         if (currentIndex >= 0 && currentIndex < PHASE_ORDER.length - 1) {
             setPhase(PHASE_ORDER[currentIndex + 1]);
-        } else if (currentIndex === PHASE_ORDER.length - 1) {
-            setPhase('NIGHT_START');
         }
     };
 
@@ -160,7 +245,14 @@ export default function GameInterface() {
                 if (finalTranscript && finalTranscript.trim()) {
                     const target = recordingTargetId || selectedPlayerId;
                     if (target) {
-                        addLog('SPEECH', finalTranscript.trim(), target);
+                        const logId = addLog('SPEECH', finalTranscript.trim(), target);
+
+                        // Async Summarization
+                        summarizeSpeech(finalTranscript.trim()).then(summary => {
+                            if (summary && summary !== finalTranscript.trim()) {
+                                updateLogSummary(logId, summary);
+                            }
+                        }).catch(err => console.error("Summary failed:", err));
                     }
                 }
 
@@ -184,6 +276,8 @@ export default function GameInterface() {
                     setRecordingTargetId(activePlayerId);
                     setSelectedPlayerId(null);
                     setLiveTranscript('');
+                    setHistory(['']); // Reset History
+                    setHistoryIndex(0);
                     setRecordingDuration(0);
 
                     const source = (activePlayerId === myPlayerId) ? 'MICROPHONE' : 'SYSTEM';
@@ -191,14 +285,19 @@ export default function GameInterface() {
                     startSpeechRecognition(
                         source,
                         (text) => {
-                            // Update live transcript ONLY
-                            setLiveTranscript(prev => {
-                                if (!prev) return text;
-                                const lastChar = prev.trim().slice(-1);
+                            // Update live transcript
+                            const current = liveTranscriptRef.current;
+                            let newText = text;
+                            if (current) {
+                                const lastChar = current.trim().slice(-1);
                                 const isPunctuation = ['。', '！', '？', '；', '.', '!', '?', ';'].includes(lastChar);
                                 const separator = isPunctuation ? '' : '，';
-                                return prev + separator + text;
-                            });
+                                newText = current + separator + text;
+                            }
+
+                            setLiveTranscript(newText);
+                            pushHistory(newText);
+
                             setIsAudioDetected(true);
                         },
                         (err) => {
@@ -284,18 +383,37 @@ export default function GameInterface() {
     return (
         <div className="flex flex-col h-screen max-w-6xl mx-auto p-4 md:p-6 gap-6 relative">
             {/* Top Bar */}
+            {/* Top Bar */}
             <header className="flex items-center justify-between turbo-card p-4 shrink-0">
                 <div className="flex items-center gap-4">
                     <div className="bg-violet-600/20 text-violet-400 px-3 py-1 rounded text-sm font-bold border border-violet-600/50">
                         第 {day} 天
                     </div>
-                    <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                        {PHASE_NAMES[phase] || phase}
-                        <span className="text-xs text-slate-500 font-normal ml-2 hidden md:inline-block">({phase})</span>
-                    </h2>
+                    <div className="flex flex-col">
+                        <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                            {PHASE_NAMES[phase] || phase}
+                            <span className="text-xs text-slate-500 font-normal ml-2 hidden md:inline-block">({phase})</span>
+                        </h2>
+                        <span className="text-xs text-slate-400 mt-0.5">{PHASE_DESCRIPTIONS[phase]}</span>
+                    </div>
                 </div>
 
                 <div className="flex gap-2 items-center">
+                    {/* Next Phase Indicator */}
+                    <div className="hidden md:flex flex-col items-end mr-4">
+                        <span className="text-[10px] text-slate-500 uppercase tracking-wider">NEXT</span>
+                        <div className="text-xs text-slate-300 font-medium flex items-center gap-1">
+                            {(() => {
+                                const currentIndex = PHASE_ORDER.indexOf(phase);
+                                if (currentIndex >= 0 && currentIndex < PHASE_ORDER.length - 1) {
+                                    return PHASE_NAMES[PHASE_ORDER[currentIndex + 1]];
+                                }
+                                return PHASE_NAMES['NIGHT_START'];
+                            })()}
+                            <ChevronRight size={12} className="text-violet-500" />
+                        </div>
+                    </div>
+
                     {/* ASR Status Badge */}
                     {gameState.asrState && (
                         <div className={clsx(
@@ -386,12 +504,38 @@ export default function GameInterface() {
                                 </div>
                             </div>
 
-                            {/* Live Transcript */}
-                            <div className="bg-slate-950/50 p-3 rounded border border-slate-700 min-h-[60px]">
-                                <div className="text-xs text-slate-500 mb-1">实时转录:</div>
-                                <div className="text-sm text-white">
-                                    {liveTranscript || <span className="text-slate-600 italic">等待语音输入...</span>}
+                            {/* Live Transcript (Editable) */}
+                            <div className="bg-slate-950/50 p-2 rounded border border-slate-700 min-h-[80px] flex flex-col gap-2">
+                                <div className="flex justify-between items-center text-xs text-slate-500 px-1">
+                                    <span>实时转录 (可编辑):</span>
+                                    <div className="flex gap-1">
+                                        <button
+                                            onClick={handleUndo}
+                                            disabled={historyIndex <= 0}
+                                            className="p-1 hover:bg-slate-800 rounded disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-white transition-colors"
+                                            title="撤销 (Undo)"
+                                        >
+                                            <Undo size={14} />
+                                        </button>
+                                        <button
+                                            onClick={handleRedo}
+                                            disabled={historyIndex >= history.length - 1}
+                                            className="p-1 hover:bg-slate-800 rounded disabled:opacity-30 disabled:cursor-not-allowed text-slate-400 hover:text-white transition-colors"
+                                            title="恢复 (Redo)"
+                                        >
+                                            <Redo size={14} />
+                                        </button>
+                                    </div>
                                 </div>
+                                <textarea
+                                    className="w-full bg-transparent border-none outline-none resize-none text-sm text-white h-20 leading-relaxed custom-scrollbar"
+                                    value={liveTranscript}
+                                    onChange={(e) => {
+                                        setLiveTranscript(e.target.value);
+                                        pushHistory(e.target.value);
+                                    }}
+                                    placeholder="等待语音输入或直接键入..."
+                                />
                             </div>
                         </div>
                     )}
@@ -406,7 +550,17 @@ export default function GameInterface() {
                             <h3 className="text-sm font-bold text-violet-400 flex items-center gap-2">
                                 <BrainCircuit size={16} />
                                 AI 局势分析
-                                {isAnalyzing && <span className="text-xs text-slate-500 animate-pulse">思考中...</span>}
+                                {isAnalyzing ? (
+                                    <span className="text-xs text-slate-500 animate-pulse">思考中...</span>
+                                ) : (
+                                    <button
+                                        onClick={runAnalysis}
+                                        className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-white transition-colors"
+                                        title="立即重新分析"
+                                    >
+                                        <RefreshCw size={12} />
+                                    </button>
+                                )}
                             </h3>
                             <div className="flex items-center gap-2">
                                 <span className="text-xs text-slate-400">胜率预测</span>
@@ -439,15 +593,29 @@ export default function GameInterface() {
                     </div>
 
                     {/* Logs Area / Vote Recorder */}
-                    <div className="turbo-card p-4 flex-1 flex flex-col min-h-0">
+                    <div className="turbo-card p-4 flex-1 flex flex-col min-h-0 relative">
                         {phase === 'VOTE' ? (
                             <VoteRecorder />
                         ) : (
                             <>
-                                <h3 className="text-sm font-bold text-cyan-400 mb-2 border-b border-slate-800 pb-2 shrink-0">
-                                    对局记录
-                                </h3>
-                                <GameLog />
+                                {showSheriffVote && phase === 'ELECTION' ? (
+                                    <VoteRecorder mode="SHERIFF" onClose={() => setShowSheriffVote(false)} />
+                                ) : (
+                                    <>
+                                        <h3 className="text-sm font-bold text-cyan-400 mb-2 border-b border-slate-800 pb-2 shrink-0 flex justify-between items-center">
+                                            <span>对局记录</span>
+                                            {phase === 'ELECTION' && (
+                                                <button
+                                                    onClick={() => setShowSheriffVote(true)}
+                                                    className="text-xs bg-amber-900/50 text-amber-500 border border-amber-500/30 px-2 py-0.5 rounded hover:bg-amber-900 hover:text-amber-400 transition-colors"
+                                                >
+                                                    警长投票
+                                                </button>
+                                            )}
+                                        </h3>
+                                        <GameLog />
+                                    </>
+                                )}
                             </>
                         )}
                     </div>
@@ -475,19 +643,27 @@ export default function GameInterface() {
                                 {selectedPlayer.id === myPlayerId && <span className="ml-2 text-sm text-violet-400">(我)</span>}
                             </h3>
                             <button
-                                onClick={() => {
-                                    if (!isRecording) setSelectedPlayerId(null);
-                                }}
-                                className="text-slate-400 hover:text-white"
-                                disabled={isRecording}
+                                onClick={() => setSelectedPlayerId(null)}
+                                className="text-slate-400 hover:text-white transition-colors"
                             >
                                 <X size={24} />
                             </button>
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 min-h-0 flex-1 overflow-hidden">
-                            {/* Left: Actions */}
-                            <div className="overflow-y-auto pr-2 space-y-6">
+                            {/* Left: Actions & Analysis */}
+                            <div className="overflow-y-auto pr-2 flex flex-col gap-6">
+                                {/* AI Analysis Block */}
+                                <div className="bg-slate-900/50 p-4 rounded-xl border border-violet-500/20 shadow-inner">
+                                    <h4 className="text-sm font-bold text-violet-400 mb-2 flex items-center gap-2">
+                                        <BrainCircuit size={16} />
+                                        AI 行为分析
+                                    </h4>
+                                    <p className="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                        {selectedPlayer.analysis || (isAnalyzing ? "正在生成分析..." : "暂无分析数据")}
+                                    </p>
+                                </div>
+
                                 <div className="grid grid-cols-2 gap-3">
                                     <button
                                         onClick={() => handleAction('KILL')}

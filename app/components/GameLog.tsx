@@ -39,9 +39,17 @@ export default function GameLog() {
                                 {log.type}
                             </span>
                         </div>
-                        <p className="text-slate-300 leading-relaxed">
+                        <p className="text-slate-300 leading-relaxed break-words">
                             {log.message}
                         </p>
+                        {log.summary && (
+                            <div className="mt-2 bg-slate-800/50 p-2 rounded border-l-2 border-violet-500">
+                                <span className="text-[10px] uppercase font-bold text-violet-400 block mb-1">AI 摘要</span>
+                                <p className="text-slate-400 text-xs italic leading-relaxed">
+                                    {log.summary}
+                                </p>
+                            </div>
+                        )}
                     </div>
                 </div>
             ))}

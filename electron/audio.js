@@ -7,6 +7,7 @@
 
 const recorder = require('node-record-lpcm16');
 const speech = require('@google-cloud/speech');
+const logger = require('./logger');
 
 // Initialize Google Cloud Speech client (requires API key configuration)
 const speechClient = new speech.SpeechClient({
@@ -38,7 +39,7 @@ function startSystemAudioCapture(onTranscription) {
     const recognizeStream = speechClient
         .streamingRecognize(request)
         .on('error', (error) => {
-            console.error('Speech recognition error:', error);
+            logger.error(`[Audio] Speech recognition error: ${error}`);
         })
         .on('data', (data) => {
             if (data.results[0] && data.results[0].alternatives[0]) {

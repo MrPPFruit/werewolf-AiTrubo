@@ -11,22 +11,6 @@ interface VoskResult {
     };
 }
 
-// Native Electron API Type Definition
-declare global {
-    interface Window {
-        electronAPI?: {
-            isElectron: boolean;
-            startRecording: (callback: (text: string) => void) => void;
-            stopRecording: () => Promise<{ success: boolean; error?: string }>;
-            voskInit: () => Promise<{ success: boolean; error?: string }>;
-            voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
-            onVoskResult: (callback: (data: VoskResult) => void) => void;
-            offVoskResult: () => void;
-            voskFlush?: () => Promise<{ success: boolean; error?: string }>;
-            getDesktopSources: () => Promise<{ success: boolean; sources?: Array<{ id: string; name: string }>; error?: string }>;
-        }
-    }
-}
 
 // Web Speech API Implementation (Browser Mode)
 let recognition: any = null;
@@ -285,56 +269,196 @@ export const correctTextWithAI = async (text: string): Promise<string> => {
     return corrected;
 };
 
+/**
+ * Summarize speech using AI
+ */
+export const summarizeSpeech = async (text: string): Promise<string> => {
+    // @ts-ignore
+    if (typeof window !== 'undefined' && window.electronAPI?.summarizeSpeech) {
+        try {
+            // @ts-ignore
+            const result = await window.electronAPI.summarizeSpeech(text);
+            if (result.success && result.summary) {
+                return result.summary;
+            }
+        } catch (e) {
+            console.error('[AI] Summarize failed:', e);
+        }
+    }
+    return text; // Fallback to original text
+};
+
 export const analyzeGameState = async (gameState: GameState): Promise<{
     analysis: string;
     probabilities: Record<string, number>;
     roleProbabilities: Record<string, Record<string, number>>;
     winRate: number; // 0-100
     dangerAlert: string | null; // Warning message if critical point
+    playerAnalysis: Record<string, string>; // Detailed analysis per player
 }> => {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-
-    // Mock logic to generate probabilities based on random
-    const probabilities: Record<string, number> = {};
-    const roleProbabilities: Record<string, Record<string, number>> = {};
-
-    gameState.players.forEach(player => {
-        if (player.status === 'ALIVE') {
-            const wolfProb = Math.floor(Math.random() * 100);
-            probabilities[player.id] = wolfProb;
-
-            roleProbabilities[player.id] = {
-                'WEREWOLF': wolfProb,
-                'VILLAGER': Math.max(0, 100 - wolfProb - 30),
-                'SEER': Math.floor(Math.random() * 20),
-                'WITCH': Math.floor(Math.random() * 15),
-            };
-        }
-    });
-
-    const alivePlayers = gameState.players.filter(p => p.status === 'ALIVE');
-    const aliveWolves = alivePlayers.filter(p => p.role === 'WEREWOLF').length;
-    const aliveGood = alivePlayers.length - aliveWolves;
-
-    let winRate = 50;
-    if (aliveWolves === 0) winRate = 100;
-    else if (aliveGood <= aliveWolves) winRate = 0;
-    else winRate = Math.floor((aliveGood / (aliveGood + aliveWolves)) * 100);
-
-    let dangerAlert = null;
-    if (aliveGood <= aliveWolves + 1) {
-        dangerAlert = "警告：好人阵营濒临失败！";
-    } else if (aliveWolves === 1 && alivePlayers.length > 4) {
-        dangerAlert = "提示：仅剩一只狼，注意屠边风险";
+    // 1. Check environment
+    // @ts-ignore
+    if (typeof window === 'undefined' || !window.electronAPI?.analyzeGame) {
+        console.warn("[AI] Analysis not available in this environment");
+        return {
+            analysis: "AI分析服务未连接",
+            probabilities: {},
+            roleProbabilities: {},
+            winRate: 50,
+            dangerAlert: null,
+            playerAnalysis: {}
+        };
     }
 
-    const analysis = `当前局势分析：存活 ${alivePlayers.length} 人，预计狼人 ${aliveWolves} 只。好人阵营胜率 ${winRate}%。`;
-
-    return {
-        analysis,
-        probabilities,
-        roleProbabilities,
-        winRate,
-        dangerAlert,
+    // 2. Prepare Context
+    // Simplistic context serialization
+    const context = {
+        gameConfig: gameState.config, // [NEW] Inject Board Configuration
+        myPlayerId: gameState.myPlayerId,
+        day: gameState.day,
+        phase: gameState.phase,
+        players: gameState.players.map(p => ({
+            id: p.id,
+            number: p.number,
+            status: p.status,
+            isSheriff: p.isSheriff,
+            tags: p.tags, // Action tags like 'SHOOTER'
+            // Only send role if it's ME or known (e.g. revealed) - logic typically in store but here we trust current state
+            role: p.id === gameState.myPlayerId ? p.role : undefined,
+            isMarkedTeammate: p.isMarkedTeammate // [NEW] Send Teammate Mark to AI
+        })),
+        // Filter recent logs (last 2 days maybe? or all relevant ones)
+        // Ideally we prioritize logs with summaries
+        logs: gameState.logs.filter(l => ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type)).map(l => ({
+            day: l.day,
+            type: l.type,
+            source: l.sourcePlayerId,
+            target: l.targetPlayerId,
+            content: l.summary || l.message // Use summary if available!
+        }))
     };
+
+    // [NEW] Wolf Logic Optimization - Board Aware
+    let systemInstructionAppendix = "";
+
+    // Check if I am a wolf
+    const myRole = gameState.players.find(p => p.id === gameState.myPlayerId)?.role;
+    const isWolf = ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(myRole as string);
+
+    if (isWolf) {
+        // 1. Identify my known teammates
+        const teammates = gameState.players.filter(p =>
+            p.id !== gameState.myPlayerId &&
+            ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(p.role as string)
+        ).map(p => `${p.number}号`);
+
+        // 2. Check Board Configuration for Special Roles
+        const hasMixblood = (gameState.config.roles['MIXBLOOD'] || 0) > 0;
+        // const hasMechWolf = (gameState.config.roles['MECHANICAL_WOLF'] || 0) > 0; // Future support
+
+        let teammateInfo = "";
+        if (teammates.length > 0) {
+            teammateInfo = `你已知的狼队友是 [${teammates.join(', ')}]。`;
+        } else {
+            teammateInfo = `你不认识任何队友（可能是孤狼或队友已死）。`;
+        }
+
+        let unknownFactorWarning = "";
+        if (hasMixblood) {
+            unknownFactorWarning = `
+            **注意：板子包含【混血儿】。**
+            虽然除队友外的玩家大部分是好人，但其中可能混有以狼人为榜样的混血儿（属于狼队）。
+            因此，**不要绝对排除**场上存在未知狼队成员的可能性。`;
+        } else {
+            // Standard Game: No hidden wolves
+            unknownFactorWarning = `
+            **在当前板子下，狼队没有隐藏成员。**
+            因此，**除队友外的所有其他玩家**，其为狼人的概率应视为 **0%**。
+            请专注于分析这些“好人”的具体身份（神职还是平民）。`;
+        }
+
+        systemInstructionAppendix = `
+            **狼人视角特殊规则：**
+            玩家本人是狼人。${teammateInfo}
+            ${unknownFactorWarning}`;
+    }
+
+    const messages = [
+        {
+            role: 'system',
+            content: `你是一个狼人杀高玩分析师。请根据提供的游戏数据进行逻辑推理。
+            
+            **重要：请务必基于【gameConfig】中的板子配置（角色配置）进行分析。**
+            例如：如果不包含“守卫”，则不要推测“同守同救”；如果包含“狼王”，则需考虑其开枪带人的可能性。
+            
+            **关于死亡玩家：**
+            即使玩家已经死亡，也请继续分析其身份概率，这对判断局势至关重要（例如：判断死走的是神还是民）。不要因为玩家死亡就忽略其身份分析。
+            ${systemInstructionAppendix}
+
+            输出必须是严格的 JSON 格式，不包含 markdown 代码块或其他文本。格式如下：
+            {
+                "analysis": "全局局势分析（50字以内，需结合板子配置）",
+                "winRate": 50, // 好人胜率 0-100
+                "dangerAlert": "紧急提示（可选，无则为null）",
+                "players": {
+                    "p-1": {
+                        "roleProbabilities": { "WEREWOLF": 30, "SEER": 10, ... },
+                        "analysis": "对该玩家的详细逻辑分析（例如行为、发言逻辑点，100字以内）"
+                    },
+                    ...
+                }
+            }`
+        },
+        {
+            role: 'user',
+            content: JSON.stringify(context)
+        }
+    ];
+
+    try {
+        // @ts-ignore
+        const res = await window.electronAPI.analyzeGame(messages);
+        if (!res.success || !res.analysis) {
+            throw new Error(res.error || "Empty response");
+        }
+
+        // Clean up markdown code blocks if present (common issue with LLMs)
+        let rawJson = res.analysis.replace(/```json/g, '').replace(/```/g, '').trim();
+        const aiData = JSON.parse(rawJson);
+
+        // Map response to verified structure
+        const probabilities: Record<string, number> = {};
+        const roleProbabilities: Record<string, Record<string, number>> = {};
+        const playerAnalysis: Record<string, string> = {};
+
+        if (aiData.players) {
+            Object.entries(aiData.players).forEach(([playerId, pData]: [string, any]) => {
+                roleProbabilities[playerId] = pData.roleProbabilities || {};
+                // Calculate max wolf probability
+                const wolfProb = (pData.roleProbabilities?.['WEREWOLF'] || 0) + (pData.roleProbabilities?.['WOLF_KING'] || 0) + (pData.roleProbabilities?.['BEAUTY_WOLF'] || 0);
+                probabilities[playerId] = wolfProb;
+                playerAnalysis[playerId] = pData.analysis || "暂无分析";
+            });
+        }
+
+        return {
+            analysis: aiData.analysis || "AI分析完成",
+            probabilities,
+            roleProbabilities,
+            winRate: aiData.winRate || 50,
+            dangerAlert: aiData.dangerAlert || null,
+            playerAnalysis
+        };
+
+    } catch (e) {
+        console.error('[AI] Analysis Error:', e);
+        return {
+            analysis: "AI分析失败: " + (e instanceof Error ? e.message : String(e)),
+            probabilities: {},
+            roleProbabilities: {},
+            winRate: 50,
+            dangerAlert: null,
+            playerAnalysis: {}
+        };
+    }
 };

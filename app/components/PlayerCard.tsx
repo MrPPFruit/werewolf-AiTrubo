@@ -89,7 +89,7 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
             </div>
 
             {/* Probability Overlay (Top Right) */}
-            {probs.length > 0 && !isDead && (
+            {probs.length > 0 && (
                 <div className="absolute top-10 right-2 flex flex-col items-end gap-0.5 z-10 pointer-events-none">
                     {probs.map(([role, prob]) => (
                         <div key={role} className={clsx(
@@ -170,62 +170,66 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
 
 
             {/* Footer: Role Name / Action */}
-            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 to-transparent p-3 pt-8">
+            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/90 to-transparent p-2 pt-6">
                 <div className="flex justify-between items-end">
-                    <div className="flex flex-col">
+                    <div className="flex flex-col min-w-0 pr-1">
                         {isMe && player.role && (
-                            <span className="text-violet-300 font-bold text-sm tracking-wider">
+                            <span className="text-violet-300 font-bold text-xs tracking-wider truncate">
                                 {player.role}
                             </span>
                         )}
-                        <span className={clsx("text-xs font-medium uppercase", isDead ? "text-red-500" : "text-green-500")}>
+                        <span className={clsx("text-[10px] font-medium uppercase", isDead ? "text-red-500" : "text-green-500")}>
                             {player.status === 'EXILED' ? '放逐' : (player.status === 'DEAD' ? '死亡' : '存活')}
                         </span>
                     </div>
 
-                    {/* Action Button Placeholder (e.g. Record) */}
-                    {!isDead && (
-                        <div className="flex gap-1">
-                            {onToggleCampaign && (
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); onToggleCampaign(e); }}
-                                    className={clsx(
-                                        "p-1.5 rounded-full transition-colors",
-                                        player.isCampaigning ? "bg-amber-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-amber-500 hover:text-white"
-                                    )}
-                                    title={player.isCampaigning ? "取消上警" : "上警"}
-                                >
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7L12 12M12 2L22 7L12 12M12 12V22M2 7L12 22L22 7" /></svg>
-                                </button>
-                            )}
-                            {onQuitElection && player.isCampaigning && !player.hasQuitElection && (
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); onQuitElection(e); }}
-                                    className="p-1.5 rounded-full bg-slate-800 text-slate-400 hover:bg-blue-500 hover:text-white transition-colors"
-                                    title="退水"
-                                >
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C16.4183 22 20 18.4183 20 14C20 10 12 2 12 2C12 2 4 10 4 14C4 18.4183 7.58172 22 12 22Z" /></svg>
-                                </button>
-                            )}
-                            {onQuickRecord && (
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        onQuickRecord(e);
-                                    }}
-                                    className={clsx(
-                                        "p-1.5 rounded-full transition-all",
-                                        isRecording
-                                            ? "bg-red-500 text-white animate-pulse"
-                                            : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
-                                    )}
-                                    title={isRecording ? "停止录音" : "开始录音"}
-                                >
-                                    <Mic size={14} fill={isRecording ? "currentColor" : "none"} />
-                                </button>
-                            )}
-                        </div>
-                    )}
+                    {/* Action Button Group */}
+                    <div className="flex items-center gap-1 shrink-0">
+                        {!isDead && (
+                            <>
+                                {onToggleCampaign && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); onToggleCampaign(e); }}
+                                        className={clsx(
+                                            "w-6 h-6 flex items-center justify-center rounded-full transition-colors",
+                                            player.isCampaigning ? "bg-amber-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-amber-500 hover:text-white"
+                                        )}
+                                        title={player.isCampaigning ? "取消上警" : "上警"}
+                                    >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7L12 12M12 2L22 7L12 12M12 12V22M2 7L12 22L22 7" /></svg>
+                                    </button>
+                                )}
+                                {onQuitElection && player.isCampaigning && !player.hasQuitElection && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); onQuitElection(e); }}
+                                        className="w-6 h-6 flex items-center justify-center rounded-full bg-slate-800 text-slate-400 hover:bg-blue-500 hover:text-white transition-colors"
+                                        title="退水"
+                                    >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C16.4183 22 20 18.4183 20 14C20 10 12 2 12 2C12 2 4 10 4 14C4 18.4183 7.58172 22 12 22Z" /></svg>
+                                    </button>
+                                )}
+                            </>
+                        )}
+
+                        {/* Recording is allowed for dead players (e.g. Last Words) */}
+                        {onQuickRecord && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onQuickRecord(e);
+                                }}
+                                className={clsx(
+                                    "w-8 h-8 flex items-center justify-center rounded-full transition-all shadow-lg",
+                                    isRecording
+                                        ? "bg-red-500 text-white animate-pulse"
+                                        : "bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white border border-slate-600"
+                                )}
+                                title={isRecording ? "停止录音" : "开始录音"}
+                            >
+                                <Mic size={14} fill={isRecording ? "currentColor" : "none"} />
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
 

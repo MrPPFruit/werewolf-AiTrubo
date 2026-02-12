@@ -7,8 +7,9 @@ interface GameStore extends GameState {
     nextPhase: () => void;
     setPhase: (phase: GamePhase) => void;
     updatePlayer: (playerId: string, updates: Partial<Player>) => void;
-    addLog: (type: LogType, message: string, sourceId?: string, targetId?: string) => void;
+    addLog: (type: LogType, message: string, sourceId?: string, targetId?: string) => string;
     updateLog: (id: string, message: string) => void;
+    updateLogSummary: (id: string, summary: string) => void;
     killPlayer: (playerId: string) => void;
     revivePlayer: (playerId: string) => void;
     setSheriff: (playerId: string | null) => void;
@@ -18,12 +19,15 @@ interface GameStore extends GameState {
     togglePlayerTag: (playerId: string, tag: 'SHOOTER' | 'SHOT_DEAD') => void;
     addRelation: (type: GameRelation['type'], sourceId: string, targetId?: string) => void;
     submitVote: (voterId: string, targetId: string | null) => void; // New: Vote action
+    retractVote: (voterId: string) => void;
+    organizeVote: (targetIds: string[]) => void;
     wolfSelfDestruct: (playerId: string) => void;
     toggleCampaign: (playerId: string) => void;
     quitElection: (playerId: string) => void;
     setMixbloodTarget: (targetId: string) => void;
-    updateProbabilities: (probabilities: Record<string, Record<string, number>>) => void;
-    setAsrState: (state: Partial<import('@/app/types/game').ASRState>) => void; // New ASR State
+    updateProbabilities: (probabilities: Record<string, Record<string, number>>, analysisMap?: Record<string, string>) => void;
+    setAsrState: (state: Partial<import('@/app/types/game').ASRState>) => void;
+    incrementDay: () => void;
     resetGame: () => void;
 }
 
@@ -77,7 +81,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             config: { playerCount, roles, templateId },
             players,
             phase: 'NIGHT_START',
-            day: 0,
+            day: 1,
             logs: [],
             myPlayerId: `p-${myNumber}`,
             sheriffId: null,
@@ -95,17 +99,20 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
     setPhase: (phase) => set({ phase }),
 
+    incrementDay: () => set((state) => ({ day: state.day + 1 })),
+
     updatePlayer: (playerId, updates) =>
         set((state) => ({
             players: state.players.map((p) => (p.id === playerId ? { ...p, ...updates } : p)),
         })),
 
-    addLog: (type, message, sourceId, targetId) =>
+    addLog: (type, message, sourceId, targetId) => {
+        const id = crypto.randomUUID();
         set((state) => ({
             logs: [
                 ...state.logs,
                 {
-                    id: crypto.randomUUID(),
+                    id,
                     timestamp: Date.now(),
                     day: state.day,
                     phase: state.phase,
@@ -115,7 +122,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     targetPlayerId: targetId,
                 },
             ],
-        })),
+        }));
+        return id;
+    },
 
     updateLog: (id, newMessage) => {
         set(state => ({
@@ -134,14 +143,22 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }));
     },
 
+    updateLogSummary: (id, summary) => {
+        set(state => ({
+            logs: state.logs.map(log => (log.id === id ? { ...log, summary } : log))
+        }));
+    },
+
     killPlayer: (playerId) => {
         get().updatePlayer(playerId, { status: 'DEAD' });
-        get().addLog('DEATH', `Player ${playerId} marked as DEAD`, undefined, playerId);
+        const p = get().players.find(p => p.id === playerId);
+        get().addLog('DEATH', `玩家 ${p?.number} 号被标记死亡`, undefined, playerId);
     },
 
     revivePlayer: (playerId) => {
         get().updatePlayer(playerId, { status: 'ALIVE' });
-        get().addLog('ACTION', `Player ${playerId} revived`, undefined, playerId);
+        const p = get().players.find(p => p.id === playerId);
+        get().addLog('ACTION', `玩家 ${p?.number} 号复活`, undefined, playerId);
     },
 
     setSheriff: (playerId: string | null) => {
@@ -169,11 +186,16 @@ export const useGameStore = create<GameStore>((set, get) => ({
     },
 
     submitVote: (voterId, targetId) => {
-        const { players } = get();
+        const { players, day, phase } = get();
         const voter = players.find(p => p.id === voterId);
         const target = targetId ? players.find(p => p.id === targetId) : null;
 
         if (!voter) return;
+
+        // Remove previous vote for this phase if exists (to avoid duplicates in log if retrying, or just append?)
+        // Usually we append, but for accurate state we might want to cleanup? 
+        // Let's just append for history, but UI filters latest.
+        // Actually, if we use `retractVote` for modification, we are good.
 
         get().addRelation('VOTE', voterId, targetId || undefined);
 
@@ -181,6 +203,29 @@ export const useGameStore = create<GameStore>((set, get) => ({
             ? `玩家 ${voter.number} 投票给 -> ${target.number}`
             : `玩家 ${voter.number} 弃票`;
         get().addLog('VOTE', message, voterId, targetId || undefined);
+    },
+
+    retractVote: (voterId) => {
+        const { day, phase } = get();
+        // Remove ALL vote relations for this voter in this day/phase to allow re-voting
+        // We filter out only the entries that match constraints
+        set(state => ({
+            relations: state.relations.filter(r =>
+                !(r.type === 'VOTE' && r.sourceId === voterId && r.day === day && r.phase === phase)
+            )
+        }));
+    },
+
+    organizeVote: (targetIds) => {
+        const { players, myPlayerId, sheriffId } = get();
+        if (!sheriffId) return; // Logic check
+
+        const sheriff = players.find(p => p.id === sheriffId);
+        const targets = players.filter(p => targetIds.includes(p.id)).map(p => p.number).join(', ');
+
+        if (targets) {
+            get().addLog('ACTION', `警长 ${sheriff?.number || '?'} 归票于: [${targets}]`, sheriffId);
+        }
     },
 
     wolfSelfDestruct: (playerId) => {
@@ -202,6 +247,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     sourceId,
                     targetId,
                     day: get().day,
+                    phase: get().phase,
                     timestamp: Date.now()
                 }
             ]
@@ -235,7 +281,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 ),
             }));
         } else {
-            get().addLog('SYSTEM', 'Cannot mark more teammates than total wolves.');
+            get().addLog('SYSTEM', '标记的狼队友数量不能超过狼人总数。');
         }
     },
 
@@ -247,12 +293,30 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }));
     },
 
-    updateProbabilities: (probabilities) =>
+    updateProbabilities: (probabilities, analysisMap) =>
         set((state) => ({
-            players: state.players.map((p) => ({
-                ...p,
-                roleProbabilities: probabilities[p.id] || p.roleProbabilities,
-            })),
+            players: state.players.map((p) => {
+                let newProbs = probabilities[p.id] || p.roleProbabilities;
+
+                // Override: Self
+                if (p.id === state.myPlayerId && p.role) {
+                    newProbs = { [p.role]: 100 };
+                }
+                // Override: Marked Teammate
+                else if (p.isMarkedTeammate) {
+                    newProbs = { WEREWOLF: 100 };
+                }
+                // Override: Wolf Logic (If I am Wolf, anyone NOT me and NOT teammate is 0% Wolf)
+                else if (['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(state.players.find((me: Player) => me.id === state.myPlayerId)?.role || '')) {
+                    newProbs = { WEREWOLF: 0 };
+                }
+
+                return {
+                    ...p,
+                    roleProbabilities: newProbs,
+                    analysis: analysisMap?.[p.id] || p.analysis,
+                };
+            }),
         })),
 
     togglePlayerTag: (playerId, tag) => {
@@ -273,14 +337,13 @@ export const useGameStore = create<GameStore>((set, get) => ({
             players: state.players.map((p) => {
                 if (p.id !== playerId) return p;
                 const isCampaigning = !p.isCampaigning;
-                const hasQuitElection = isCampaigning ? false : p.hasQuitElection;
-                return { ...p, isCampaigning, hasQuitElection };
+                return { ...p, isCampaigning, hasQuitElection: isCampaigning ? false : p.hasQuitElection };
             }),
         }));
 
         const player = get().players.find(p => p.id === playerId);
         if (player) {
-            const action = !player.isCampaigning ? '上警' : '取消上警';
+            const action = player.isCampaigning ? '上警' : '取消上警';
             get().addLog('ACTION', `玩家 ${player.number} ${action}`, playerId);
         }
     },

@@ -42,6 +42,7 @@ export interface Player {
   mixbloodTargetId?: string; // Mixblood: chosen role model
   notes: string; // User notes about this player
   avatar?: string;
+  analysis?: string; // AI Logic Analysis for this player
 }
 
 export type LogType = 'SYSTEM' | 'VOTE' | 'DEATH' | 'SPEECH' | 'ACTION';
@@ -54,6 +55,7 @@ export interface GameLog {
   type: LogType;
   message: string;
   originalMessage?: string; // For restoring edited logs
+  summary?: string; // AI Summarized Logic Point
   sourcePlayerId?: string;
   targetPlayerId?: string;
 }
@@ -64,6 +66,7 @@ export interface GameRelation {
   sourceId: string; // Shooter, Previous Sheriff, or Voter
   targetId?: string; // Victim, Next Sheriff, or Vote Target (undefined if LOST or ABSTAIN)
   day: number; // The game day this occurred
+  phase?: GamePhase; // The phase this occurred (e.g. ELECTION vs VOTE)
   timestamp: number;
 }
 
