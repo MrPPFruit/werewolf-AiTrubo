@@ -16,48 +16,44 @@ const ROLE_LABELS: Record<Role, string> = {
     IDIOT: '白痴',
     WOLF_KING: '狼王',
     BEAUTY_WOLF: '狼美人',
+    MIXBLOOD: '混血儿',
 };
 
 const GAME_TEMPLATES = [
     {
         id: '12_standard',
-        name: '12人 标准预女猎白',
+        name: '12人 标准局 (预女猎白)',
+        description: '4狼 4民 预女猎白',
         playerCount: 12,
-        roles: {
-            VILLAGER: 4, WEREWOLF: 4, SEER: 1, WITCH: 1, HUNTER: 1, IDIOT: 1,
-            GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0
-        },
-        desc: '网易官方/经典赛事最常用版型，平衡性好'
+        roles: { WEREWOLF: 4, VILLAGER: 4, SEER: 1, WITCH: 1, HUNTER: 1, IDIOT: 1, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0 }
     },
     {
         id: '12_guard',
-        name: '12人 预女猎守',
+        name: '12人 守卫局 (预女猎守)',
+        description: '4狼 4民 预女猎守',
         playerCount: 12,
-        roles: {
-            VILLAGER: 4, WEREWOLF: 4, SEER: 1, WITCH: 1, HUNTER: 1, GUARD: 1,
-            IDIOT: 0, WOLF_KING: 0, BEAUTY_WOLF: 0
-        },
-        desc: '强调守卫防守与狼人进攻的博弈'
+        roles: { WEREWOLF: 4, VILLAGER: 4, SEER: 1, WITCH: 1, HUNTER: 1, GUARD: 1, IDIOT: 0, WOLF_KING: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0 }
     },
     {
         id: '12_wolf_king_guard',
-        name: '12人 狼王守卫',
+        name: '12人 狼王守卫 (预女猎守+狼王)',
+        description: '3普狼 1狼王 4民 预女猎守',
         playerCount: 12,
-        roles: {
-            VILLAGER: 4, WEREWOLF: 3, WOLF_KING: 1, SEER: 1, WITCH: 1, HUNTER: 1, GUARD: 1,
-            IDIOT: 0, BEAUTY_WOLF: 0
-        },
-        desc: '京城大师赛常见，狼王可带人，守卫需谨慎'
+        roles: { WEREWOLF: 3, WOLF_KING: 1, VILLAGER: 4, SEER: 1, WITCH: 1, HUNTER: 1, GUARD: 1, IDIOT: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0 }
     },
     {
-        id: '12_wolf_beauty_guard',
-        name: '12人 狼美人骑士/守卫',
+        id: '12_wolf_king_idiot',
+        name: '12人 狼王白痴 (预女猎白+狼王)',
+        description: '3普狼 1狼王 4民 预女猎白',
         playerCount: 12,
-        roles: {
-            VILLAGER: 4, WEREWOLF: 3, BEAUTY_WOLF: 1, SEER: 1, WITCH: 1, HUNTER: 1, GUARD: 1,
-            IDIOT: 0, WOLF_KING: 0
-        },
-        desc: '狼美人魅惑控制，局势极其复杂'
+        roles: { WEREWOLF: 3, WOLF_KING: 1, VILLAGER: 4, SEER: 1, WITCH: 1, HUNTER: 1, IDIOT: 1, GUARD: 0, BEAUTY_WOLF: 0, MIXBLOOD: 0 }
+    },
+    {
+        id: '12_mixblood',
+        name: '12人 混子 (预女猎白+混)',
+        description: '4狼 3民 1混 预女猎白',
+        playerCount: 12,
+        roles: { WEREWOLF: 4, VILLAGER: 3, MIXBLOOD: 1, SEER: 1, WITCH: 1, HUNTER: 1, IDIOT: 1, GUARD: 0, WOLF_KING: 0, BEAUTY_WOLF: 0 }
     },
     {
         id: '10_fast',

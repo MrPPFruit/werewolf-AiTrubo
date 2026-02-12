@@ -10,11 +10,14 @@ interface PlayerCardProps {
     onClick: () => void;
     latestSpeech?: string;
     onQuickRecord?: (e: React.MouseEvent) => void;
+    onToggleCampaign?: (e: React.MouseEvent) => void;
+    onQuitElection?: (e: React.MouseEvent) => void;
     isRecording?: boolean;
     relations?: { id: string, type: string, sourceId: string, targetId?: string, sourceNumber?: number }[];
+    isMixbloodTarget?: boolean;
 }
 
-export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuickRecord, isRecording, relations }: PlayerCardProps) {
+export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget }: PlayerCardProps) {
     const isDead = player.status === 'DEAD' || player.status === 'EXILED';
 
     // Sort probabilities > 10%
@@ -107,7 +110,7 @@ export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuic
                 </div>
             )}
 
-            {/* Center: Role Icon / Status */}
+            {/* Center: Role Icon / Status / Election Status */}
             <div className="absolute inset-0 flex flex-col items-center justify-center pt-6 pointer-events-none">
                 {isDead ? (
                     <Skull size={48} className="text-slate-600" />
@@ -115,6 +118,29 @@ export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuic
                     <div className="w-16 h-16 rounded-full bg-slate-800/50 flex items-center justify-center relative">
                         {/* Placeholder for Avatar */}
                         <span className="text-2xl opacity-20">?</span>
+
+                        {/* Election Status: Campaigning (Hand) */}
+                        {player.isCampaigning && !player.hasQuitElection && (
+                            <div className="absolute -top-2 -right-2 bg-amber-500 rounded-full p-1 shadow-lg animate-bounce z-20">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 2C13.1 2 14 2.9 14 4V11C14 11.55 13.55 12 13 12C12.45 12 12 11.55 12 11V7" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M9 13V7C9 6.45 8.55 6 8 6C7.45 6 7 6.45 7 7V13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M17 13V8C17 7.45 16.55 7 16 7C15.45 7 15 7.45 15 8V13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M20 13V9C20 8.45 19.55 8 19 8C18.45 8 18 8.45 18 9V13" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M7 13C7 16 10.5 19 13.5 19C15.5 19 17.5 18 19 16.5" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M7 13V15" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                </svg>
+                            </div>
+                        )}
+
+                        {/* Election Status: Quit (Water Drop) */}
+                        {player.hasQuitElection && (
+                            <div className="absolute -bottom-2 -right-2 bg-blue-500 rounded-full p-1 shadow-lg z-20">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+                                    <path d="M12 22C16.4183 22 20 18.4183 20 14C20 10 12 2 12 2C12 2 4 10 4 14C4 18.4183 7.58172 22 12 22Z" fill="white" />
+                                </svg>
+                            </div>
+                        )}
 
                         {/* Show if Shot - Victim */}
                         {relations?.filter(r => r.type === 'SHOOT' && r.targetId === player.id).map(r => (
@@ -126,28 +152,21 @@ export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuic
                                 </div>
                             </div>
                         ))}
+                        {/* Mixblood Link (Visible to self) */}
+                        {isMixbloodTarget && (
+                            <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                                <div className="absolute inset-0 border-4 border-purple-500 rounded-full animate-pulse opacity-60" />
+                                <div className="bg-purple-900/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-full border border-purple-500 shadow-xl transform -translate-y-8 flex items-center gap-1 min-w-max">
+                                    <Crown size={12} />
+                                    <span>榜样</span>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
 
-            {/* Quick Record Button (Bottom Right) */}
-            {onQuickRecord && !isDead && (
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onQuickRecord(e);
-                    }}
-                    className={clsx(
-                        "absolute bottom-2 right-2 p-2 rounded-full shadow-lg transition-all z-20 group-hover:scale-110",
-                        isRecording
-                            ? "bg-red-500 text-white animate-pulse ring-4 ring-red-500/20"
-                            : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
-                    )}
-                    title={isRecording ? "停止录音" : "开始录音"}
-                >
-                    <Mic size={16} fill={isRecording ? "currentColor" : "none"} />
-                </button>
-            )}
+
 
 
 
@@ -167,26 +186,67 @@ export default function PlayerCard({ player, isMe, onClick, latestSpeech, onQuic
 
                     {/* Action Button Placeholder (e.g. Record) */}
                     {!isDead && (
-                        <button className="p-1.5 rounded-full bg-slate-800 text-slate-400 hover:bg-cyan-500 hover:text-white transition-colors">
-                            <Mic size={14} />
-                        </button>
+                        <div className="flex gap-1">
+                            {onToggleCampaign && (
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); onToggleCampaign(e); }}
+                                    className={clsx(
+                                        "p-1.5 rounded-full transition-colors",
+                                        player.isCampaigning ? "bg-amber-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-amber-500 hover:text-white"
+                                    )}
+                                    title={player.isCampaigning ? "取消上警" : "上警"}
+                                >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7L12 12M12 2L22 7L12 12M12 12V22M2 7L12 22L22 7" /></svg>
+                                </button>
+                            )}
+                            {onQuitElection && player.isCampaigning && !player.hasQuitElection && (
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); onQuitElection(e); }}
+                                    className="p-1.5 rounded-full bg-slate-800 text-slate-400 hover:bg-blue-500 hover:text-white transition-colors"
+                                    title="退水"
+                                >
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C16.4183 22 20 18.4183 20 14C20 10 12 2 12 2C12 2 4 10 4 14C4 18.4183 7.58172 22 12 22Z" /></svg>
+                                </button>
+                            )}
+                            {onQuickRecord && (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onQuickRecord(e);
+                                    }}
+                                    className={clsx(
+                                        "p-1.5 rounded-full transition-all",
+                                        isRecording
+                                            ? "bg-red-500 text-white animate-pulse"
+                                            : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
+                                    )}
+                                    title={isRecording ? "停止录音" : "开始录音"}
+                                >
+                                    <Mic size={14} fill={isRecording ? "currentColor" : "none"} />
+                                </button>
+                            )}
+                        </div>
                     )}
                 </div>
             </div>
 
             {/* Speech Overlay (Centered) */}
-            {latestSpeech && !isDead && (
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90%] z-20 animate-in fade-in zoom-in-95 duration-300 pointer-events-none">
-                    <div className="bg-black/70 backdrop-blur-md text-slate-100 text-xs py-2 px-3 rounded-xl border border-white/10 shadow-2xl text-center leading-relaxed">
-                        &ldquo;{latestSpeech}&rdquo;
+            {
+                latestSpeech && !isDead && (
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90%] z-20 animate-in fade-in zoom-in-95 duration-300 pointer-events-none">
+                        <div className="bg-black/70 backdrop-blur-md text-slate-100 text-xs py-2 px-3 rounded-xl border border-white/10 shadow-2xl text-center leading-relaxed">
+                            &ldquo;{latestSpeech}&rdquo;
+                        </div>
                     </div>
-                </div>
-            )}
+                )
+            }
 
             {/* Hitbox overlay for status effect */}
-            {isDead && (
-                <div className="absolute inset-0 bg-red-900/10 pointer-events-none" />
-            )}
-        </div>
+            {
+                isDead && (
+                    <div className="absolute inset-0 bg-red-900/10 pointer-events-none" />
+                )
+            }
+        </div >
     );
 }

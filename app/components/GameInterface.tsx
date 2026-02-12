@@ -6,6 +6,7 @@ import { RefreshCw, Mic, ChevronRight, X, Skull, HeartPulse, Crown, MessageSquar
 import clsx from 'clsx';
 import PlayerCard from './PlayerCard';
 import GameLog from './GameLog';
+import VoteRecorder from './VoteRecorder';
 import { GamePhase } from '@/app/types/game';
 import { analyzeGameState, startSpeechRecognition, stopSpeechRecognition } from '@/app/services/aiService';
 
@@ -16,8 +17,8 @@ const PHASE_ORDER: GamePhase[] = [
     'WITCH_ACTION',
     'HUNTER_ACTION',
     'DAY_START',
-    'DEATH_ANNOUNCE',
     'ELECTION',
+    'DEATH_ANNOUNCE',
     'SPEECH',
     'VOTE',
     'EXILE_SPEECH',
@@ -116,7 +117,7 @@ export default function GameInterface() {
     };
 
     const handleAction = async (
-        action: 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION',
+        action: 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION' | 'TOGGLE_CAMPAIGN' | 'QUIT_ELECTION' | 'SET_MIXBLOOD_TARGET',
         payload?: any,
         targetId?: string // Optional target ID to override selectedPlayerId
     ) => {
@@ -252,6 +253,15 @@ export default function GameInterface() {
             case 'TOGGLE_TAG':
                 gameState.togglePlayerTag(id, payload);
                 break;
+            case 'TOGGLE_CAMPAIGN':
+                gameState.toggleCampaign(id);
+                break;
+            case 'QUIT_ELECTION':
+                gameState.quitElection(id);
+                break;
+            case 'SET_MIXBLOOD_TARGET':
+                gameState.setMixbloodTarget(id);
+                break;
         }
         if (!isRecording) setSelectedPlayerId(null);
     };
@@ -284,6 +294,22 @@ export default function GameInterface() {
                 </div>
 
                 <div className="flex gap-2 items-center">
+                    {/* ASR Status Badge */}
+                    {gameState.asrState && (
+                        <div className={clsx(
+                            "hidden md:flex items-center gap-1.5 px-2 py-1 rounded text-xs font-bold border",
+                            gameState.asrState.type === 'CLOUD'
+                                ? "bg-green-500/10 text-green-400 border-green-500/30"
+                                : "bg-yellow-500/10 text-yellow-400 border-yellow-500/30"
+                        )} title={`正在使用: ${gameState.asrState.model}`}>
+                            <div className={clsx(
+                                "w-1.5 h-1.5 rounded-full",
+                                gameState.asrState.type === 'CLOUD' ? "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" : "bg-yellow-500"
+                            )} />
+                            {gameState.asrState.type === 'CLOUD' ? 'Qwen-ASR' : 'Vosk Local'}
+                        </div>
+                    )}
+
                     <button onClick={resetGame} className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-red-400 transition-colors" title="重置对局">
                         <RefreshCw size={20} />
                     </button>
@@ -309,11 +335,14 @@ export default function GameInterface() {
                                         onClick={() => setSelectedPlayerId(player.id)}
                                         latestSpeech={lastLog?.message}
                                         onQuickRecord={(e) => handleAction('RECORD', undefined, player.id)}
+                                        onToggleCampaign={phase === 'ELECTION' ? (e) => handleAction('TOGGLE_CAMPAIGN', undefined, player.id) : undefined}
+                                        onQuitElection={phase === 'ELECTION' ? (e) => handleAction('QUIT_ELECTION', undefined, player.id) : undefined}
                                         isRecording={isRecording && recordingTargetId === player.id}
                                         relations={gameState.relations?.map(r => ({
                                             ...r,
                                             sourceNumber: players.find(p => p.id === r.sourceId)?.number
                                         }))}
+                                        isMixbloodTarget={players.find(p => p.id === myPlayerId)?.mixbloodTargetId === player.id}
                                     />
                                     {/* Wolf Probability Badge - REMOVED here, moved to PlayerCard or kept simple? 
                                         Let's keep the simple badge for top level view, but maybe use the new probabilities?
@@ -407,12 +436,18 @@ export default function GameInterface() {
                         </p>
                     </div>
 
-                    {/* Logs Area */}
+                    {/* Logs Area / Vote Recorder */}
                     <div className="turbo-card p-4 flex-1 flex flex-col min-h-0">
-                        <h3 className="text-sm font-bold text-cyan-400 mb-2 border-b border-slate-800 pb-2 shrink-0">
-                            对局记录
-                        </h3>
-                        <GameLog />
+                        {phase === 'VOTE' ? (
+                            <VoteRecorder />
+                        ) : (
+                            <>
+                                <h3 className="text-sm font-bold text-cyan-400 mb-2 border-b border-slate-800 pb-2 shrink-0">
+                                    对局记录
+                                </h3>
+                                <GameLog />
+                            </>
+                        )}
                     </div>
 
                     {/* Controls Area */}
@@ -601,6 +636,24 @@ export default function GameInterface() {
                                 >
                                     <Skull size={18} />
                                     狼人自爆 (直接入夜)
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Mixblood Actions */}
+                        {players.find(p => p.id === myPlayerId)?.role === 'MIXBLOOD' && selectedPlayerId !== myPlayerId && (
+                            <div className="col-span-2 pt-2 border-t border-slate-800">
+                                <button
+                                    onClick={() => handleAction('SET_MIXBLOOD_TARGET')}
+                                    className={clsx(
+                                        "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                        players.find(p => p.id === myPlayerId)?.mixbloodTargetId === selectedPlayerId
+                                            ? "bg-purple-600 text-white"
+                                            : "bg-slate-800 text-purple-400 hover:bg-slate-700"
+                                    )}
+                                >
+                                    <Crown size={18} />
+                                    {players.find(p => p.id === myPlayerId)?.mixbloodTargetId === selectedPlayerId ? '已选为榜样' : '认作榜样'}
                                 </button>
                             </div>
                         )}

@@ -11,13 +11,18 @@ interface GameStore extends GameState {
     killPlayer: (playerId: string) => void;
     revivePlayer: (playerId: string) => void;
     setSheriff: (playerId: string | null) => void;
-    transferSheriff: (targetId: string | null) => void; // New: Transfer or Lost
+    transferSheriff: (targetId: string | null) => void;
     toggleTeammateMark: (playerId: string) => void;
     setPlayerMark: (playerId: string, mark: Role | 'GOOD' | 'BAD' | 'SILVER' | 'PROTECT' | null) => void;
     togglePlayerTag: (playerId: string, tag: 'SHOOTER' | 'SHOT_DEAD') => void;
-    addRelation: (type: GameRelation['type'], sourceId: string, targetId?: string) => void; // New: Add relation
-    wolfSelfDestruct: (playerId: string) => void; // New: Wolf Suicide
+    addRelation: (type: GameRelation['type'], sourceId: string, targetId?: string) => void;
+    submitVote: (voterId: string, targetId: string | null) => void; // New: Vote action
+    wolfSelfDestruct: (playerId: string) => void;
+    toggleCampaign: (playerId: string) => void;
+    quitElection: (playerId: string) => void;
+    setMixbloodTarget: (targetId: string) => void;
     updateProbabilities: (probabilities: Record<string, Record<string, number>>) => void;
+    setAsrState: (state: Partial<import('@/app/types/game').ASRState>) => void; // New ASR State
     resetGame: () => void;
 }
 
@@ -31,6 +36,7 @@ const initialRoles: Record<Role, number> = {
     IDIOT: 0,
     WOLF_KING: 0,
     BEAUTY_WOLF: 0,
+    MIXBLOOD: 0,
 };
 
 const initialState: GameState = {
@@ -40,7 +46,7 @@ const initialState: GameState = {
     day: 0,
     players: [],
     logs: [],
-    relations: [], // Init relations
+    relations: [],
     myPlayerId: null,
     sheriffId: null,
     createdAt: 0,
@@ -62,7 +68,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
         set({
             id: crypto.randomUUID(),
-            config: { playerCount, roles, templateId }, // Store templateId
+            config: { playerCount, roles, templateId },
             players,
             phase: 'NIGHT_START',
             day: 0,
@@ -76,12 +82,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
     },
 
     nextPhase: () => {
-        // Basic phase transition logic (simplified for now)
-        // Detailed implementation will depend on game rules
         const currentPhase = get().phase;
-        let next = currentPhase;
-        // TODO: Implement full phase machine
-        set({ phase: next });
+        // Basic placeholder for phase logic
+        set({ phase: currentPhase });
     },
 
     setPhase: (phase) => set({ phase }),
@@ -130,7 +133,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         const currentSheriffId = get().sheriffId;
         const { players } = get();
 
-        // Log the transfer/loss
         if (targetId) {
             get().addRelation('SHERIFF_TRANSFER', currentSheriffId || 'system', targetId);
             get().addLog('SYSTEM', `警徽流转: ${players.find(p => p.id === currentSheriffId)?.number || '?'} -> ${players.find(p => p.id === targetId)?.number}`, currentSheriffId || undefined, targetId);
@@ -142,13 +144,28 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }
     },
 
+    submitVote: (voterId, targetId) => {
+        const { players } = get();
+        const voter = players.find(p => p.id === voterId);
+        const target = targetId ? players.find(p => p.id === targetId) : null;
+
+        if (!voter) return;
+
+        get().addRelation('VOTE', voterId, targetId || undefined);
+
+        const message = target
+            ? `玩家 ${voter.number} 投票给 -> ${target.number}`
+            : `玩家 ${voter.number} 弃票`;
+        get().addLog('VOTE', message, voterId, targetId || undefined);
+    },
+
     wolfSelfDestruct: (playerId) => {
         const p = get().players.find(p => p.id === playerId);
         if (!p) return;
 
         get().killPlayer(playerId);
         get().addLog('ACTION', `狼人 ${p.number} 号自爆`, playerId);
-        get().setPhase('NIGHT_START'); // Direct to Night
+        get().setPhase('NIGHT_START');
     },
 
     addRelation: (type, sourceId, targetId) => {
@@ -160,6 +177,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     type,
                     sourceId,
                     targetId,
+                    day: get().day,
                     timestamp: Date.now()
                 }
             ]
@@ -171,7 +189,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
         const targetPlayer = players.find(p => p.id === playerId);
         if (!targetPlayer) return;
 
-        // If currently marked, just unmark (always allowed)
         if (targetPlayer.isMarkedTeammate) {
             set((state) => ({
                 players: state.players.map((p) =>
@@ -181,7 +198,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
             return;
         }
 
-        // If marking, check limit
         const totalWolves = Object.entries(config.roles)
             .filter(([role]) => ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(role))
             .reduce((sum, [, count]) => sum + count, 0);
@@ -195,8 +211,6 @@ export const useGameStore = create<GameStore>((set, get) => ({
                 ),
             }));
         } else {
-            // Optional: Notify user limit reached? For now just don't mark.
-            // A toast or log would be better, but keeping it simple for store logic.
             get().addLog('SYSTEM', 'Cannot mark more teammates than total wolves.');
         }
     },
@@ -227,6 +241,57 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     : [...tags, tag];
                 return { ...p, tags: newTags };
             }),
+        }));
+    },
+
+    toggleCampaign: (playerId) => {
+        set((state) => ({
+            players: state.players.map((p) => {
+                if (p.id !== playerId) return p;
+                const isCampaigning = !p.isCampaigning;
+                const hasQuitElection = isCampaigning ? false : p.hasQuitElection;
+                return { ...p, isCampaigning, hasQuitElection };
+            }),
+        }));
+
+        const player = get().players.find(p => p.id === playerId);
+        if (player) {
+            const action = !player.isCampaigning ? '上警' : '取消上警';
+            get().addLog('ACTION', `玩家 ${player.number} ${action}`, playerId);
+        }
+    },
+
+    quitElection: (playerId) => {
+        set((state) => ({
+            players: state.players.map((p) =>
+                p.id === playerId ? { ...p, isCampaigning: false, hasQuitElection: true } : p
+            ),
+        }));
+        const player = get().players.find(p => p.id === playerId);
+        if (player) {
+            get().addLog('ACTION', `玩家 ${player.number} 退水`, playerId);
+        }
+    },
+
+    setMixbloodTarget: (targetId) => {
+        set((state) => ({
+            players: state.players.map((p) =>
+                p.id === state.myPlayerId ? { ...p, mixbloodTargetId: targetId } : p
+            ),
+        }));
+        const target = get().players.find(p => p.id === targetId);
+        get().addLog('SYSTEM', `你已认 ${target?.number} 号为榜样`, get().myPlayerId || undefined);
+    },
+
+    setAsrState: (updates) => {
+        set(state => ({
+            asrState: {
+                type: 'LOCAL',
+                model: 'vosk-model-small-cn-0.22',
+                status: 'READY',
+                ...state.asrState,
+                ...updates
+            }
         }));
     },
 

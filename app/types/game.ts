@@ -7,7 +7,8 @@ export type Role =
   | 'GUARD'
   | 'IDIOT'
   | 'WOLF_KING'
-  | 'BEAUTY_WOLF';
+  | 'BEAUTY_WOLF'
+  | 'MIXBLOOD';
 
 export type GamePhase =
   | 'SETUP' // Configuration
@@ -36,6 +37,9 @@ export interface Player {
   markedRole?: Role | 'GOOD' | 'BAD' | 'SILVER' | 'PROTECT'; // Local mark for Seer/Witch/Guard
   roleProbabilities?: Record<string, number>; // Local analysis: Role -> Probability %
   tags?: ('SHOOTER' | 'SHOT_DEAD')[]; // Special status tags
+  isCampaigning?: boolean; // Sheriff election: participating
+  hasQuitElection?: boolean; // Sheriff election: withdrew
+  mixbloodTargetId?: string; // Mixblood: chosen role model
   notes: string; // User notes about this player
   avatar?: string;
 }
@@ -54,10 +58,18 @@ export interface GameLog {
 
 export interface GameRelation {
   id: string;
-  type: 'SHOOT' | 'SHERIFF_TRANSFER' | 'SHERIFF_LOST';
-  sourceId: string; // Shooter or Previous Sheriff
-  targetId?: string; // Victim or Next Sheriff (undefined if LOST)
+  type: 'SHOOT' | 'SHERIFF_TRANSFER' | 'SHERIFF_LOST' | 'VOTE';
+  sourceId: string; // Shooter, Previous Sheriff, or Voter
+  targetId?: string; // Victim, Next Sheriff, or Vote Target (undefined if LOST or ABSTAIN)
+  day: number; // The game day this occurred
   timestamp: number;
+}
+
+export interface ASRState {
+  type: 'CLOUD' | 'LOCAL';
+  model: string;
+  status: 'READY' | 'RECORDING' | 'PROCESSING' | 'ERROR';
+  errorMessage?: string;
 }
 
 export interface GameState {

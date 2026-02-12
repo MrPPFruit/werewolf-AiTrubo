@@ -1,9 +1,12 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const isDev = require('electron-is-dev');
+const DashScopeClient = require('./dashscope');
+const { DASHSCOPE_API_KEY } = require('./config');
 
 let mainWindow;
 let audioRecorder = null;
+let dashClient = null;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -185,29 +188,78 @@ const initVoiceServer = async () => {
 // IPC: Init
 ipcMain.handle('vosk-init', async () => {
     try {
+        // Initialize DashScope if configured
+        console.log('[Main] Checking DashScope Config. Key exists:', !!DASHSCOPE_API_KEY, 'Model:', require('./config').DASHSCOPE_MODEL);
+        if (DASHSCOPE_API_KEY) {
+            console.log('[Main] Initializing DashScope Client...');
+            dashClient = new DashScopeClient(
+                (text, isFinal) => {
+                    if (mainWindow) {
+                        mainWindow.webContents.send('vosk-result', {
+                            type: isFinal ? 'result' : 'partial',
+                            data: isFinal ? { text } : { partial: text }
+                        });
+                    }
+                },
+                (err) => {
+                    console.error('[DashScope] Error:', err);
+                    if (mainWindow) {
+                        // Optionally send error to frontend
+                    }
+                }
+            );
+            dashClient.start();
+        }
+
+        // Also init local Vosk (as backup or just parallel?)
+        // If DashScope is used, maybe we don't need Vosk running?
+        // But for now, let's keep Vosk initialization logic but maybe skip if DashScope is primary?
+        // Actually, let's run both or just return success if DashScope is ready.
+        // Let's Init Vosk anyway for fallback.
         const success = await initVoiceServer();
-        return { success };
+        // Return model info
+        const { DASHSCOPE_MODEL } = require('./config');
+        return {
+            success,
+            usingCloud: !!DASHSCOPE_API_KEY,
+            model: DASHSCOPE_API_KEY ? (DASHSCOPE_MODEL || 'qwen3-asr-flash-realtime') : 'vosk-model-small-cn-0.22'
+        };
     } catch (e) {
         return { success: false, error: e.message };
     }
 });
 
-// IPC: Process Audio (Stream to Sidecar)
-// IPC: Process Audio (Stream to Sidecar)
-// Changed to .on() for better performance (Fire-and-forget, no Promise overhead)
+// IPC: Process Audio (Stream to Sidecar or Cloud)
 ipcMain.on('vosk-process-audio', (event, data) => {
-    if (!voiceProcess || !voiceProcess.stdin) return; // No Ack needed
+    // 1. Cloud ASR (Priority)
+    if (dashClient && dashClient.isReady) {
+        try {
+            let buffer;
+            // Handle various buffer types from IPC
+            if (Buffer.isBuffer(data)) {
+                buffer = data;
+            } else if (data.buffer) {
+                buffer = Buffer.from(data.buffer, data.byteOffset || 0, data.byteLength);
+            } else {
+                buffer = Buffer.from(data);
+            }
+            dashClient.sendAudio(buffer);
+            return;
+        } catch (e) {
+            console.error('[DashScope] Write Error:', e);
+            // Fallthrough to local?
+        }
+    }
+
+    // 2. Local Vosk (Fallback)
+    if (!voiceProcess || !voiceProcess.stdin) return;
     try {
-        // data comes from IPC.
-        // We ensure it's a Node Buffer for stdin.write
         let buffer;
         if (Buffer.isBuffer(data)) {
             buffer = data;
         } else if (data.buffer) {
-            // Handle TypedArrays (Int16Array etc) or ArrayBuffer wrapper
             buffer = Buffer.from(data.buffer, data.byteOffset || 0, data.byteLength);
         } else {
-            // Fallback (ArrayBuffer or Array)
             buffer = Buffer.from(data);
         }
 

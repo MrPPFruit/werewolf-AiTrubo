@@ -1,13 +1,13 @@
 import { startVoskRecording as startRecording, stopVoskRecording as stopRecording } from './voskService';
+import { useGameStore } from '../store/gameStore';
 
 // Native Electron API Type Definition
 declare global {
     interface Window {
         electronAPI?: {
             isElectron: boolean;
-            startRecording: (callback: (text: string) => void) => void;
             stopRecording: () => Promise<{ success: boolean; error?: string }>;
-            voskInit: () => Promise<{ success: boolean; error?: string }>;
+            voskInit: () => Promise<{ success: boolean; error?: string; usingCloud?: boolean; model?: string }>;
             voskProcessAudio: (buffer: Int16Array) => Promise<{ error?: string }>;
             onVoskResult: (callback: (data: VoskResult) => void) => void;
             offVoskResult: () => void;
@@ -77,14 +77,20 @@ const initAudioContext = async () => {
     }
 
     try {
-        console.log('[SidecarVosk] Initializing AudioContext...');
-        audioContext = new AudioContext({ latencyHint: 'interactive' });
+        console.log('[SidecarVosk] Initializing AudioContext (Native 16kHz)...');
+        // CRITICAL OPTIMIZATION: Force AudioContext to 16kHz
+        // This makes the browser use its high-quality native resampler (usually FIR)
+        // instead of us doing poor-quality linear interpolation in JS.
+        audioContext = new AudioContext({
+            sampleRate: 16000,
+            latencyHint: 'interactive'
+        });
 
         // Load Worklet
         const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
         const workletUrl = URL.createObjectURL(blob);
         await audioContext.audioWorklet.addModule(workletUrl);
-        console.log('[SidecarVosk] AudioWorklet Loaded. Sample Rate:', audioContext.sampleRate);
+        console.log('[SidecarVosk] AudioWorklet Loaded. Context Sample Rate:', audioContext.sampleRate);
     } catch (e) {
         console.error('[SidecarVosk] AudioContext Init Error:', e);
         throw e;
@@ -109,6 +115,17 @@ export const startVoskRecording = async (
             if (!init.success) {
                 throw new Error(`Vosk Sidecar Init Failed: ${init.error}`);
             }
+            if (init.usingCloud) {
+                console.log('%c[ASR] Using Alibaba Cloud Qwen-ASR', 'color: green; font-weight: bold;');
+            } else {
+                console.log('[ASR] Using Local Vosk Model');
+            }
+            // Sync to Store
+            useGameStore.getState().setAsrState({
+                type: init.usingCloud ? 'CLOUD' : 'LOCAL',
+                model: init.model || (init.usingCloud ? 'qwen3-asr-flash-realtime' : 'vosk-model-small-cn-0.22'),
+                status: 'READY'
+            });
             isVoskInitialized = true;
         }
 
@@ -149,7 +166,7 @@ export const startVoskRecording = async (
         workletNode = new AudioWorkletNode(audioContext, 'vosk-audio-processor');
 
         workletNode.port.onmessage = (event) => {
-            const inputData = event.data; // Float32Array (Raw)
+            const inputData = event.data; // Float32Array (Already 16kHz due to AudioContext setting)
 
             // 1. Audio Level
             if (onAudioLevel) {
@@ -162,14 +179,10 @@ export const startVoskRecording = async (
                 onAudioLevel(Math.min(100, Math.round(rms * 400)));
             }
 
-            // 2. Downsample & Convert
-            const targetRate = 16000;
-            const sourceRate = audioContext?.sampleRate || 48000;
-            const downsampled = downsampleBuffer(inputData, sourceRate, targetRate);
-
-            const buffer = new Int16Array(downsampled.length);
-            for (let i = 0; i < downsampled.length; i++) {
-                let s = Math.max(-1, Math.min(1, downsampled[i]));
+            // 2. Convert Float32 to Int16 (No Downsampling needed)
+            const buffer = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+                let s = Math.max(-1, Math.min(1, inputData[i]));
                 buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
             }
 
@@ -181,11 +194,11 @@ export const startVoskRecording = async (
         source.connect(workletNode);
         workletNode.connect(audioContext.destination);
 
-        console.log('[SidecarVosk] Recording started');
+        console.log('[SidecarVosk] Recording started with Native 16kHz');
 
-    } catch (e) {
+    } catch (e: any) {
         console.error('[SidecarVosk] Start Error:', e);
-        onError(e);
+        onError(e.message || e);
     }
 };
 
@@ -211,7 +224,7 @@ async function getSystemAudioStream(): Promise<MediaStream> {
                 chromeMediaSource: 'desktop',
                 chromeMediaSourceId: sourceId
             }
-        } as any, // Cast to any because TS DOM types don't include Electron specifics
+        } as any,
         video: {
             mandatory: {
                 chromeMediaSource: 'desktop',
@@ -220,50 +233,11 @@ async function getSystemAudioStream(): Promise<MediaStream> {
         } as any
     });
 
-    // We only want audio. System Capture usually returns a video track (screen) + audio track.
-    // If we don't need video, we might be able to stop it to save resources?
-    // Actually, `desktop` source often REQUIRES video track to be requested.
-    // We can just ignore the video track.
-
-    // IMPORTANT: Check if we actually got an audio track. 
-    // Mac OS often requires loopback driver (like BlackHole) for this to work natively?
-    // Windows usually works fine with 'loopback' if enabled? 
-    // Actually Electron's desktopCapturer audio is tricky. It captures "System Audio" on Windows if 'audio' is true.
-
     if (stream.getAudioTracks().length === 0) {
         throw new Error("No audio track found in system capture. Please check system permissions.");
     }
 
     return stream;
-}
-
-// Simple Linear Interpolation Downsampler
-function downsampleBuffer(buffer: Float32Array, sampleRate: number, outSampleRate: number): Float32Array {
-    if (outSampleRate === sampleRate) {
-        return buffer;
-    }
-    if (outSampleRate > sampleRate) {
-        // Simple upsampling or just throw
-        // For voice, we usually don't upsample 16k to 48k here.
-        return buffer;
-    }
-    const sampleRateRatio = sampleRate / outSampleRate;
-    const newLength = Math.round(buffer.length / sampleRateRatio);
-    const result = new Float32Array(newLength);
-    let offsetResult = 0;
-    let offsetBuffer = 0;
-    while (offsetResult < result.length) {
-        const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-        let accum = 0, count = 0;
-        for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-            accum += buffer[i];
-            count++;
-        }
-        result[offsetResult] = count > 0 ? accum / count : 0;
-        offsetResult++;
-        offsetBuffer = nextOffsetBuffer;
-    }
-    return result;
 }
 
 export const stopVoskRecording = async () => {
