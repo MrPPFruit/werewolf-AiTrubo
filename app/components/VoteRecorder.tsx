@@ -11,14 +11,14 @@ interface VoteRecorderProps {
 }
 
 export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderProps) {
-    const { players, submitVote, retractVote, organizeVote, relations, day, phase, sheriffId, myPlayerId } = useGameStore();
+    const { players, submitVote, retractVote, nextVoteRound, organizeVote, relations, day, phase, sheriffId, myPlayerId, currentVoteRound } = useGameStore();
 
     // Get voting history for current day to show who already voted
     // Note: If multiple votes happen in one day (Sheriff + Exile), this simple filter mixes them.
     // Ideally we filter by phase too if relation recorded it, but currently it doesn't.
     // For now we assume they don't overlap or we accept the mix.
-    // Get voting history for current day AND phase to isolate Sheriff Vote from Exile Vote
-    const todaysVotes = relations.filter(r => r.type === 'VOTE' && r.day === day && (r.phase === (mode === 'SHERIFF' ? 'ELECTION' : 'VOTE')));
+    // Get voting history for current day AND phase AND ROUND to isolate Sheriff Vote from Exile Vote
+    const todaysVotes = relations.filter(r => r.type === 'VOTE' && r.day === day && (r.phase === (mode === 'SHERIFF' ? 'ELECTION' : 'VOTE')) && (r.round || 1) === currentVoteRound);
 
     // List of eligible voters (Alive)
     let voters = players.filter(p => p.status === 'ALIVE');
@@ -30,7 +30,9 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
         // Candidates: Campaigning and NOT quit
         targets = players.filter(p => p.isCampaigning && !p.hasQuitElection);
         // Voters: Alive and NOT currently campaigning (those who quit CAN vote usually)
-        voters = players.filter(p => p.status === 'ALIVE' && (!p.isCampaigning || p.hasQuitElection));
+        // strict rule: only those NOT on list of candidates can vote?
+        // Usually, those who quit election become voters.
+        voters = players.filter(p => p.status === 'ALIVE' && !p.isCampaigning);
     }
 
     // Sheriff Organization State
@@ -61,6 +63,24 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
                     {todaysVotes.length} / {voters.length} 已投票
                 </span>
             </h3>
+
+            {/* Sheriff Phase - Next Round Button (PK) */}
+            {mode === 'SHERIFF' && todaysVotes.length > 0 && (
+                <div className="mb-2 flex justify-between items-center bg-slate-800/30 p-2 rounded">
+                    <span className="text-xs text-slate-500 font-mono">当前轮次: Round {currentVoteRound}</span>
+                    <button
+                        onClick={() => {
+                            if (confirm('确定要开启下一轮 PK 投票吗？')) {
+                                nextVoteRound();
+                            }
+                        }}
+                        className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 bg-amber-900/30 px-2 py-1 rounded border border-amber-900/50"
+                    >
+                        <RotateCcw size={12} />
+                        进入下一轮 (PK)
+                    </button>
+                </div>
+            )}
 
             {/* Sheriff Organization UI (Only visible to Sheriff during Exile Vote) */}
             {isSheriff && isVotePhase && (
@@ -114,7 +134,7 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
                         : null;
 
                     return (
-                        <div key={voter.id} className="flex items-center gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-800/50">
+                        <div key={`${voter.id}-${existingVote ? 'voted' : 'pending'}-${day}`} className="flex items-center gap-3 bg-slate-900/50 p-2 rounded-lg border border-slate-800/50">
                             {/* Voter Info */}
                             <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center font-bold text-slate-300 border border-slate-700 shrink-0">
                                 {voter.number}

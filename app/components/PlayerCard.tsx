@@ -19,10 +19,13 @@ interface PlayerCardProps {
 export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget }: PlayerCardProps) {
     const isDead = player.status === 'DEAD' || player.status === 'EXILED';
 
-    // Sort probabilities > 10%
+    // Sort probabilities
+    // Filter out 0% to keep it clean, but show meaningful ones.
+    // Show Top 3.
     const probs = player.roleProbabilities ? Object.entries(player.roleProbabilities)
-        .filter(([, prob]) => prob > 10)
-        .sort(([, a], [, b]) => b - a) : [];
+        .filter(([, prob]) => prob > 0)
+        .sort(([, a], [, b]) => b - a)
+        .slice(0, 3) : [];
 
     return (
         <div

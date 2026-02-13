@@ -295,6 +295,7 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
     winRate: number; // 0-100
     dangerAlert: string | null; // Warning message if critical point
     playerAnalysis: Record<string, string>; // Detailed analysis per player
+    debugContext?: any; // [NEW] Raw context for debugging
 }> => {
     // 1. Check environment
     // @ts-ignore
@@ -310,13 +311,31 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
         };
     }
 
-    // 2. Prepare Context
+    // [NEW] Night Action Extraction (Who was poisoned/saved?)
+    const nightActions = {
+        witchSave: gameState.players.find(p =>
+            gameState.relations.some(r => r.type === 'WITCH_SAVE' && r.targetId === p.id)
+        )?.number,
+        witchPoison: gameState.players.find(p =>
+            gameState.relations.some(r => r.type === 'WITCH_POISON' && r.targetId === p.id)
+        )?.number,
+        guardProtect: gameState.players.find(p =>
+            gameState.relations.some(r => r.type === 'GUARD_PROTECT' && r.targetId === p.id && r.day === gameState.day)
+        )?.number,
+        wolfKill: gameState.players.find(p =>
+            gameState.relations.some(r => r.type === 'WOLF_KILL' && r.targetId === p.id && r.day === gameState.day)
+        )?.number
+    };
+
+    // Prepare Context
     // Simplistic context serialization
     const context = {
         gameConfig: gameState.config, // [NEW] Inject Board Configuration
         myPlayerId: gameState.myPlayerId,
         day: gameState.day,
         phase: gameState.phase,
+        skillState: gameState.skillState, // [NEW] Send Skill Usage State
+        nightActions, // [NEW] Send Night Actions
         players: gameState.players.map(p => ({
             id: p.id,
             number: p.number,
@@ -325,8 +344,38 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
             tags: p.tags, // Action tags like 'SHOOTER'
             // Only send role if it's ME or known (e.g. revealed) - logic typically in store but here we trust current state
             role: p.id === gameState.myPlayerId ? p.role : undefined,
-            isMarkedTeammate: p.isMarkedTeammate // [NEW] Send Teammate Mark to AI
+            isMarkedTeammate: p.isMarkedTeammate, // [NEW] Send Teammate Mark to AI
+            markedRole: p.markedRole, // [NEW] Send User's subjective mark (Good/Bad/Role) to AI
+            // [NEW] Election Status
+            isCampaigning: p.isCampaigning,
+            hasQuitElection: p.hasQuitElection,
+            // [NEW] Mixblood Logic (Only if I am Mixblood)
+            mixbloodTargetId: (gameState.myPlayerId && p.id === gameState.myPlayerId) ? p.mixbloodTargetId : undefined,
+            // [NEW] Public/Revealed Role Logic (e.g. Idiot)
+            // If player is IDIOT and is explicitly marked EXILED or DEAD but known...
+            // Simplified: If user marked them as IDIOT, it's covered by `markedRole`.
+            // But if it's "Game Logic" revealed (like Idiot voted out), we should auto-detect.
+            // For now, simpler to rely on `markedRole` OR if we can check logs for "Identity Revealed".
+            // Let's rely on specific check:
+            publicRole: (() => {
+                // Auto-detect public role from logs (e.g. "Idiot revealed")
+                // Simplistic check: if logs contain "白痴" and "翻牌" for this player?
+                // Start with empty, relies on AI reading logs for now, OR better:
+                // In Turbo, an exiled Idiot might not die.
+                if (p.role === 'IDIOT' && p.status === 'EXILED') return 'IDIOT';
+                return undefined;
+            })()
         })),
+        // [NEW] Structured Vote History
+        voteHistory: gameState.relations
+            .filter(r => r.type === 'VOTE')
+            .map(r => ({
+                day: r.day,
+                phase: r.phase,
+                round: r.round, // [NEW] Send Round info
+                source: r.sourceId,
+                target: r.targetId || 'ABSTAIN'
+            })),
         // Filter recent logs (last 2 days maybe? or all relevant ones)
         // Ideally we prioritize logs with summaries
         logs: gameState.logs.filter(l => ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type)).map(l => ({
@@ -383,35 +432,116 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
             ${unknownFactorWarning}`;
     }
 
+
+    // 3. Structured Input: Timeline Grouping
+    // Group logs and votes by Day/Phase to help AI understand causality
+    const timeline = [];
+    const maxDay = gameState.day;
+
+    for (let d = 1; d <= maxDay; d++) {
+        const dayEvents = [];
+
+        // Add Logs for this day
+        const dayLogs = gameState.logs
+            .filter(l => l.day === d && ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type))
+            .map(l => ({
+                type: 'LOG',
+                phase: l.phase,
+                source: l.sourcePlayerId,
+                target: l.targetPlayerId,
+                content: l.summary || l.message
+            }));
+        dayEvents.push(...dayLogs);
+
+        // Add Votes for this day
+        const dayVotes = gameState.relations
+            .filter(r => r.type === 'VOTE' && r.day === d)
+            .map(r => ({
+                type: 'VOTE_RECORD',
+                phase: r.phase,
+                round: r.round, // [NEW] Send Round info
+                source: r.sourceId,
+                target: r.targetId || 'ABSTAIN'
+            }));
+        dayEvents.push(...dayVotes);
+
+        // Sort by phase priority if needed, or just append
+        timeline.push({
+            day: d,
+            events: dayEvents
+        });
+    }
+
+    // Enhance context with timeline
+    const enhancedContext = {
+        ...context,
+        timeline, // [NEW] Structured Timeline
+        // logs: context.logs // optionally remove flat logs to save tokens, or keep for redundancy. Let's keep specific recent ones if needed, but timeline is better.
+        // We can remove 'logs' and 'voteHistory' from the root if we trust timeline.
+        // Let's keep 'voteHistory' as a quick lookup summary, but 'timeline' is the main story.
+    };
+
     const messages = [
         {
             role: 'system',
-            content: `你是一个狼人杀高玩分析师。请根据提供的游戏数据进行逻辑推理。
-            
-            **重要：请务必基于【gameConfig】中的板子配置（角色配置）进行分析。**
-            例如：如果不包含“守卫”，则不要推测“同守同救”；如果包含“狼王”，则需考虑其开枪带人的可能性。
-            
-            **关于死亡玩家：**
-            即使玩家已经死亡，也请继续分析其身份概率，这对判断局势至关重要（例如：判断死走的是神还是民）。不要因为玩家死亡就忽略其身份分析。
-            ${systemInstructionAppendix}
+            content: `You are an expert Werewolf game analyst. Analyze the game state based on the provided JSON context.
 
-            输出必须是严格的 JSON 格式，不包含 markdown 代码块或其他文本。格式如下：
-            {
-                "analysis": "全局局势分析（50字以内，需结合板子配置）",
-                "winRate": 50, // 好人胜率 0-100
-                "dangerAlert": "紧急提示（可选，无则为null）",
-                "players": {
-                    "p-1": {
-                        "roleProbabilities": { "WEREWOLF": 30, "SEER": 10, ... },
-                        "analysis": "对该玩家的详细逻辑分析（例如行为、发言逻辑点，100字以内）"
-                    },
-                    ...
-                }
-            }`
+# Input Data
+- **gameConfig**: Rules and Roles.
+- **players**: Status, tags, and KNOWN identities (role, isMarkedTeammate, markedRole).
+- **timeline**: Chronological events (Speech, Votes, Deaths).
+
+# Critical Rules
+1. **Board Configuration**: Analyze ONLY based on \`gameConfig\`. Do not hallucinate roles not in the game.
+2. **Known Facts**: 
+    - \`myPlayerId\` is YOU. \`role\` is your card.
+    - \`markedRole\` (GOOD/BAD/Role) provided by the user is **ABSOLUTE TRUTH**.
+    - \`publicRole\` (e.g. IDIOT revealed) is **ABSOLUTE TRUTH**.
+    - \`skillState\` reflects the usage of special abilities (Witch's potions, Guard's protect).
+    - \`nightActions\` reveals who was targeted by special abilities (Witch/Guard). USE THIS!
+4. **Wolf Perspective** (If you are Wolf):
+    - You know your teammates.
+    - Unless \`MIXBLOOD\` exists, any non-teammate has **0% Wolf Probability**.
+${systemInstructionAppendix}
+
+# Output Schema (TypeScript)
+You must output a JSON object satisfying this interface:
+
+\`\`\`typescript
+interface AnalysisResult {
+  // Step 1: Chain of Thought. (Output in Simplified Chinese)
+  // Synthesize the timeline. Who is suspicious? Who contradicted whom? 
+  // Why did someone vote that way? Link behaviors to roles.
+  // 200-300 words.
+  reasoning: string; 
+
+  // Step 2: Logical Contradictions (Output in Simplified Chinese)
+  // Explicitly list any hard logic conflicts (e.g. "Player 1 and 2 both claimed Seer").
+  logical_contradictions: string[];
+
+  // Step 3: Global Game State
+  winRate: number; // 0-100 (Good team win rate)
+  dangerAlert: string | null; // Immediate threats (e.g. "Game Point") (Output in Simplified Chinese)
+
+  // Step 4: Player Analysis
+  players: {
+    [playerId: string]: {
+      roleProbabilities: { [role in Role]?: number }; // e.g. { WEREWOLF: 60, SEER: 0 }
+      analysis: string; // Brief summary for this specific player (50 words) (Output in Simplified Chinese)
+    }
+  }
+}
+\`\`\`
+
+# Output Format
+1. Return **ONLY** the raw JSON string. No markdown formatting.
+2. **ALL natural language text (reasoning, analysis, etc.) MUST BE IN SIMPLIFIED CHINESE.**
+3. **CRITICAL**: You MUST provide 'roleProbabilities' and 'analysis' for **EVERY** player in the 'players' list, even if they are dead or you are unsure. Do not omit any player.
+`
         },
         {
             role: 'user',
-            content: JSON.stringify(context)
+            content: JSON.stringify(enhancedContext)
         }
     ];
 
@@ -442,12 +572,13 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
         }
 
         return {
-            analysis: aiData.analysis || "AI分析完成",
+            analysis: aiData.reasoning || aiData.analysis || "AI分析完成", // Use reasoning as main analysis text
             probabilities,
             roleProbabilities,
             winRate: aiData.winRate || 50,
             dangerAlert: aiData.dangerAlert || null,
-            playerAnalysis
+            playerAnalysis,
+            debugContext: enhancedContext // [NEW] Return context
         };
 
     } catch (e) {

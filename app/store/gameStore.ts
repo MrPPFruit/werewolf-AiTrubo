@@ -20,11 +20,19 @@ interface GameStore extends GameState {
     addRelation: (type: GameRelation['type'], sourceId: string, targetId?: string) => void;
     submitVote: (voterId: string, targetId: string | null) => void; // New: Vote action
     retractVote: (voterId: string) => void;
+    nextVoteRound: () => void; // New: Advance to next PK round
     organizeVote: (targetIds: string[]) => void;
     wolfSelfDestruct: (playerId: string) => void;
     toggleCampaign: (playerId: string) => void;
     quitElection: (playerId: string) => void;
     setMixbloodTarget: (targetId: string) => void;
+    markWolfKill: (targetId: string) => void; // New: Wolf mark target
+    // Skill Actions
+    useWitchMedic: (targetId: string) => void;
+    useWitchPoison: (targetId: string) => void;
+    guardPlayer: (targetId: string) => void;
+
+
     updateProbabilities: (probabilities: Record<string, Record<string, number>>, analysisMap?: Record<string, string>) => void;
     setAsrState: (state: Partial<import('@/app/types/game').ASRState>) => void;
     incrementDay: () => void;
@@ -54,13 +62,24 @@ const initialState: GameState = {
     relations: [],
     myPlayerId: null,
     sheriffId: null,
+    currentVoteRound: 1, // Default to round 1
     asrState: { // Default ASR State
         type: 'CLOUD',
         model: 'Loading...',
         status: 'READY'
     },
     createdAt: 0,
+    skillState: {
+        witchMedicUsed: false,
+        witchPoisonUsed: false,
+        guardLastProtectId: null,
+        hunterStatus: 'UNKNOWN',
+        wolfKillTargetId: null
+    }
 };
+
+// Export ActionType for UI components
+export type ActionType = 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION' | 'TOGGLE_CAMPAIGN' | 'QUIT_ELECTION' | 'SET_MIXBLOOD_TARGET' | 'WITCH_SAVE' | 'WITCH_POISON' | 'GUARD_PROTECT' | 'WOLF_KILL';
 
 export const useGameStore = create<GameStore>((set, get) => ({
     ...initialState,
@@ -85,6 +104,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
             logs: [],
             myPlayerId: `p-${myNumber}`,
             sheriffId: null,
+            currentVoteRound: 1,
             createdAt: Date.now(),
         });
 
@@ -97,9 +117,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
         set({ phase: currentPhase });
     },
 
-    setPhase: (phase) => set({ phase }),
+    setPhase: (phase) => set({ phase, currentVoteRound: 1 }),
 
-    incrementDay: () => set((state) => ({ day: state.day + 1 })),
+    incrementDay: () => set((state) => ({ day: state.day + 1, currentVoteRound: 1 })),
 
     updatePlayer: (playerId, updates) =>
         set((state) => ({
@@ -197,6 +217,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
         // Let's just append for history, but UI filters latest.
         // Actually, if we use `retractVote` for modification, we are good.
 
+        // Let's just append for history, but UI filters latest.
+        // Actually, if we use `retractVote` for modification, we are good.
+
         get().addRelation('VOTE', voterId, targetId || undefined);
 
         const message = target
@@ -206,14 +229,19 @@ export const useGameStore = create<GameStore>((set, get) => ({
     },
 
     retractVote: (voterId) => {
-        const { day, phase } = get();
-        // Remove ALL vote relations for this voter in this day/phase to allow re-voting
-        // We filter out only the entries that match constraints
+        const { day, phase, currentVoteRound } = get();
+        // Remove ALL vote relations for this voter in this day/phase/ROUND to allow re-voting
         set(state => ({
             relations: state.relations.filter(r =>
-                !(r.type === 'VOTE' && r.sourceId === voterId && r.day === day && r.phase === phase)
+                !(r.type === 'VOTE' && r.sourceId === voterId && r.day === day && r.phase === phase && (r.round || 1) === currentVoteRound)
             )
         }));
+    },
+
+    nextVoteRound: () => {
+        const { currentVoteRound, myPlayerId } = get();
+        set({ currentVoteRound: currentVoteRound + 1 });
+        get().addLog('ACTION', `开启第 ${currentVoteRound + 1} 轮投票 (PK)`, myPlayerId || undefined);
     },
 
     organizeVote: (targetIds) => {
@@ -248,6 +276,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
                     targetId,
                     day: get().day,
                     phase: get().phase,
+                    round: get().currentVoteRound, // Add current round
                     timestamp: Date.now()
                 }
             ]
@@ -368,6 +397,69 @@ export const useGameStore = create<GameStore>((set, get) => ({
         }));
         const target = get().players.find(p => p.id === targetId);
         get().addLog('SYSTEM', `你已认 ${target?.number} 号为榜样`, get().myPlayerId || undefined);
+    },
+
+    markWolfKill: (targetId) => {
+        const { myPlayerId, day, phase } = get();
+        // Allow re-marking? Yes.
+        // Update skill state
+        set(state => ({
+            skillState: { ...state.skillState, wolfKillTargetId: targetId }
+        }));
+
+        // Add relation for AI to pick up
+        // Note: Relation usually tracks history. If we change target, do we keep old relation?
+        // Better to clean up old WOLF_KILL for this day/phase to avoid confusion?
+        // Let's remove old WOLF_KILL for this day first.
+        set(state => ({
+            relations: state.relations.filter(r =>
+                !(r.type === 'WOLF_KILL' && r.day === day)
+            )
+        }));
+
+        get().addRelation('WOLF_KILL', myPlayerId || 'wolves', targetId);
+        get().addLog('ACTION', `狼队锁定目标: ${get().players.find(p => p.id === targetId)?.number} 号`, myPlayerId || undefined, targetId);
+    },
+
+    useWitchMedic: (targetId) => {
+        const { skillState, myPlayerId } = get();
+        if (skillState.witchMedicUsed) return;
+
+        get().revivePlayer(targetId);
+        get().addRelation('WITCH_SAVE', myPlayerId || 'witch', targetId);
+        get().addLog('ACTION', `女巫使用解药救了 ${get().players.find(p => p.id === targetId)?.number} 号`, myPlayerId || undefined, targetId);
+
+        set(state => ({
+            skillState: { ...state.skillState, witchMedicUsed: true }
+        }));
+    },
+
+    useWitchPoison: (targetId) => {
+        const { skillState, myPlayerId } = get();
+        if (skillState.witchPoisonUsed) return;
+
+        get().killPlayer(targetId);
+        get().addRelation('WITCH_POISON', myPlayerId || 'witch', targetId);
+        get().addLog('ACTION', `女巫使用毒药毒死 ${get().players.find(p => p.id === targetId)?.number} 号`, myPlayerId || undefined, targetId);
+
+        set(state => ({
+            skillState: { ...state.skillState, witchPoisonUsed: true }
+        }));
+    },
+
+    guardPlayer: (targetId) => {
+        const { skillState, myPlayerId } = get();
+        if (skillState.guardLastProtectId === targetId) {
+            get().addLog('SYSTEM', '守卫不可连续两晚守护同一名玩家', myPlayerId || undefined);
+            return;
+        }
+
+        get().addRelation('GUARD_PROTECT', myPlayerId || 'guard', targetId);
+        get().addLog('ACTION', `守卫守护了 ${get().players.find(p => p.id === targetId)?.number} 号`, myPlayerId || undefined, targetId);
+
+        set(state => ({
+            skillState: { ...state.skillState, guardLastProtectId: targetId }
+        }));
     },
 
     setAsrState: (updates) => {

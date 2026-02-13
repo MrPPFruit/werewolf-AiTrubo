@@ -294,11 +294,19 @@ ipcMain.handle('analyze-game', async (event, { messages }) => {
     try {
         const { DASHSCOPE_LLM_MODEL } = require('./config');
         const model = DASHSCOPE_LLM_MODEL || 'qwen-max';
-        console.log(`[Main] analyzing game with ${model}...`);
+        logger.info(`[AI] Analyzing game with ${model}...`);
+
+        // Log the Prompt (Debug level or Info if needed for review)
+        logger.info(`[AI] Request Messages: ${JSON.stringify(messages)}`);
+
         const result = await callDashScope(messages, model);
+
+        // Log the Response
+        logger.info(`[AI] Response Analysis: ${result}`);
+
         return { success: true, analysis: result };
     } catch (error) {
-        console.error('[Main] Analysis failed:', error);
+        logger.error('[AI] Analysis failed:', error);
         return { success: false, error: error.message };
     }
 });
@@ -330,11 +338,16 @@ ipcMain.handle('summarize-speech', async (event, { text }) => {
             { role: 'user', content: text }
         ];
 
-        console.log(`[Main] Summarizing speech with ${model}...`);
+        logger.info(`[AI] Summarizing speech with ${model}...`);
+        // logger.info(`[AI] Speech Text: ${text}`); // Optional: Log original text
+
         const summary = await callDashScope(messages, model);
+
+        logger.info(`[AI] Summary Result: ${summary}`);
+
         return { success: true, summary: summary };
     } catch (error) {
-        console.error('[Main] Summarization failed:', error);
+        logger.error('[AI] Summarization failed:', error);
         return { success: false, error: error.message };
     }
 });

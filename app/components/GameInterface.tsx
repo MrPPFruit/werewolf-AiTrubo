@@ -1,14 +1,20 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
-import { useGameStore } from '@/app/store/gameStore';
-import { RefreshCw, Mic, ChevronRight, X, Skull, HeartPulse, Crown, MessageSquare, MicOff, BrainCircuit, Shield, Crosshair, Target, Undo, Redo } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { ActionType, useGameStore } from '@/app/store/gameStore';
+import {
+    Mic, MicOff, Play, Square, RotateCcw,
+    SkipForward, Users, Shield, Skull, Moon, Sun,
+    Crown, X, Crosshair, Target, Heart, FlaskRound,
+    RefreshCw, ChevronRight, MessageSquare, BrainCircuit, HeartPulse, Undo, Redo,
+    Bug // [NEW] Debug Icon
+} from 'lucide-react';
 import clsx from 'clsx';
 import PlayerCard from './PlayerCard';
 import GameLog from './GameLog';
 import VoteRecorder from './VoteRecorder';
-import { GamePhase } from '@/app/types/game';
-import { analyzeGameState, startSpeechRecognition, stopSpeechRecognition, summarizeSpeech } from '@/app/services/aiService';
+import { GamePhase, Role, Player } from '@/app/types/game';
+import { analyzeGameState, startSpeechRecognition, stopSpeechRecognition, summarizeSpeech, checkMicrophonePermission, requestMicrophonePermission } from '@/app/services/aiService';
 
 
 const PHASE_ORDER: GamePhase[] = [
@@ -17,6 +23,7 @@ const PHASE_ORDER: GamePhase[] = [
     'SEER_ACTION',
     'WITCH_ACTION',
     'HUNTER_ACTION',
+    'GUARD_ACTION', // [NEW] Added Guard Phase
     'ELECTION',
     'DEATH_ANNOUNCE',
     'SPEECH',
@@ -31,6 +38,7 @@ const PHASE_NAMES: Record<GamePhase, string> = {
     SEER_ACTION: '预言家',
     WITCH_ACTION: '女巫',
     HUNTER_ACTION: '猎人',
+    GUARD_ACTION: '守卫', // [NEW]
     DAY_START: '天亮',
     DEATH_ANNOUNCE: '宣布死讯',
     ELECTION: '竞选警长',
@@ -47,6 +55,7 @@ const PHASE_DESCRIPTIONS: Record<GamePhase, string> = {
     SEER_ACTION: '预言家请睁眼，查验一名玩家身份',
     WITCH_ACTION: '女巫请睁眼，使用解药或毒药',
     HUNTER_ACTION: '猎人请睁眼，确认开枪状态',
+    GUARD_ACTION: '守卫请睁眼，守护一名玩家（包括自己）', // [NEW]
     DAY_START: '天亮了，竞选警长或直接发言',
     DEATH_ANNOUNCE: '昨晚死亡情况公告',
     ELECTION: '想要上警的玩家请举手',
@@ -58,7 +67,7 @@ const PHASE_DESCRIPTIONS: Record<GamePhase, string> = {
 
 export default function GameInterface() {
     const gameState = useGameStore();
-    const { phase, players, day, myPlayerId, resetGame, setPhase, killPlayer, revivePlayer, setSheriff, addLog, updateLogSummary, toggleTeammateMark, setPlayerMark, updateProbabilities, incrementDay } = gameState;
+    const { phase, players, day, myPlayerId, resetGame, setPhase, killPlayer, revivePlayer, setSheriff, addLog, updateLogSummary, toggleTeammateMark, setPlayerMark, updateProbabilities, incrementDay, skillState } = gameState;
     const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
     const [showSheriffVote, setShowSheriffVote] = useState(false); // [NEW] Sheriff Vote Toggle
     const [isRecording, setIsRecording] = useState(false);
@@ -71,6 +80,7 @@ export default function GameInterface() {
     const [confirmingRestoreId, setConfirmingRestoreId] = useState<string | null>(null); // For Restore Confirmation
     const [winRate, setWinRate] = useState<number>(50);
     const [dangerAlert, setDangerAlert] = useState<string | null>(null);
+    const [debugInfo, setDebugInfo] = useState<any>(null); // [NEW] Store debug info
 
     // Audio detection states
     const [audioLevel, setAudioLevel] = useState<number>(0);
@@ -142,6 +152,7 @@ export default function GameInterface() {
             setWolfProbabilities(result.probabilities);
             setWinRate(result.winRate);
             setDangerAlert(result.dangerAlert);
+            setDebugInfo({ context: result.debugContext, result }); // [NEW] Save debug info
             updateProbabilities(result.roleProbabilities, result.playerAnalysis); // Update detailed stats & analysis in store
         } catch (error) {
             console.error("Analysis failed:", error);
@@ -179,42 +190,153 @@ export default function GameInterface() {
     }, []);
 
     const handleNextPhase = () => {
-        // Special Phase Logic
-        if (phase === 'HUNTER_ACTION') {
-            // End of Night -> Start of Day
-            // Day 1: Election -> Death Announce
-            // Day N: Death Announce
-            if (day === 1) {
-                setPhase('ELECTION');
-            } else {
-                setPhase('DEATH_ANNOUNCE');
+        // Special Phase Logic Constraints
+        // Define which roles see which phases
+        // Phase -> Roles that can see it
+        const PRIVATE_PHASES: Partial<Record<GamePhase, Role[]>> = {
+            'WEREWOLF_ACTION': ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF', 'MIXBLOOD'], // Mixblood follows wolf? Usually follows role model but simpler to see if wolf. Or strictly wolf.
+            'SEER_ACTION': ['SEER'],
+            'WITCH_ACTION': ['WITCH'],
+            'HUNTER_ACTION': ['HUNTER'],
+            'GUARD_ACTION': ['GUARD']
+        };
+
+        const myRole = players.find(p => p.id === myPlayerId)?.role;
+
+        // Helper to check if I should participate in a phase
+        const shouldParticipate = (targetPhase: GamePhase) => {
+            // 1. If it's not a private phase (like DAY events), everyone participates
+            const allowedRoles = PRIVATE_PHASES[targetPhase];
+            if (!allowedRoles) return true;
+
+            // 2. If it is private, I must be ALIVE and have the role
+            // (Exception: Maybe Hunters need to see status even if dead? Usually action phases imply alive)
+            const myStatus = players.find(p => p.id === myPlayerId)?.status;
+            if (myStatus !== 'ALIVE') return false;
+
+            // 3. Role check
+            return myRole && allowedRoles.includes(myRole);
+        };
+
+        // Determine Next Phase Algorithm
+        let nextPhase = phase;
+        let found = false;
+        let loopCount = 0; // Safety brake
+
+        // Current index
+        let currentIndex = PHASE_ORDER.indexOf(phase);
+
+        // Special Transitions (Day start etc) - manual overrides
+        if (phase === 'GUARD_ACTION' || phase === 'HUNTER_ACTION') {
+            // Note: If GUARD is last night phase.
+            // Check PHASE_ORDER for correct "End of Night"
+            // Actually let's use the loop to find 'ELECTION' or 'DEATH_ANNOUNCE'
+            // But we need to handle the "Day 1" logic specifically if we jump phases.
+        }
+
+        while (!found && loopCount < 15) {
+            loopCount++;
+
+            // 1. Calculate Candidate
+            if (currentIndex === -1 || currentIndex >= PHASE_ORDER.length - 1) {
+                // End of list or invalid
+                // Manual transitions if needed, or loop back?
+                // Logic from original code:
+                if (phase === 'HUNTER_ACTION' || phase === 'GUARD_ACTION') { // Updated to include Guard
+                    // Logic handled below? No, Phase Order doesn't cover conditional Day 1 jump
+                    // Let's hardcode the "Night End" transition boundary if we are at the end of night phases
+                    // PHASE_ORDER: ..., HUNTER, GUARD, ELECTION, ...
+                    // If next is ELECTION, we check Day 1 logic.
+                }
             }
+
+            // Increment
+            currentIndex++;
+            if (currentIndex >= PHASE_ORDER.length) {
+                // Loop or Stop? Original code didn't loop.
+                // If we exit PHASE_ORDER, what happens?
+                // 'EXILE_SPEECH' -> 'NIGHT_START' (Next Day)
+                // This was handled manually in original code:
+                /*
+                if (phase === 'EXILE_SPEECH') {
+                   incrementDay();
+                   setPhase('NIGHT_START');
+                   return;
+               }
+               */
+                // We should keep the manual overrides for major boundaries BEFORE the loop?
+                // Or integrate them.
+                break;
+            }
+
+            const candidate = PHASE_ORDER[currentIndex];
+
+            // 2. Check "End of Night" transition specifically
+            // If we are transitioning FROM a Night phase TO a Day phase (ELECTION / DEATH_ANNOUNCE)
+            // We need to apply Day 1 logic
+            const isNightPhase = (p: GamePhase) => ['NIGHT_START', 'WEREWOLF_ACTION', 'SEER_ACTION', 'WITCH_ACTION', 'HUNTER_ACTION', 'GUARD_ACTION'].includes(p);
+
+            // If candidate is ELECTION, but it's not Day 1, we should skip ELECTION and go to DEATH_ANNOUNCE?
+            // Original logic: if (day === 1) ELECTION else DEATH_ANNOUNCE
+            if (candidate === 'ELECTION') {
+                if (day !== 1) {
+                    continue; // Skip Election if not Day 1
+                }
+            }
+
+            // 3. Skip "Private Phases" if irrelevant
+            // But wait, if we skip, we just continue the loop
+            // Optimization: "Role-Based Phase Skipping"
+            // Check if candidate is a private phase
+            if (PRIVATE_PHASES[candidate]) {
+                // Check if ANY player has this role (Game Setup Check)
+                // If the role doesn't exist in the game config, SKIP IT explicitly.
+                const roleRequired = PRIVATE_PHASES[candidate]![0]; // Simplify: 1st role usually main one
+                // Logic: If config.roles[role] > 0
+                // Access gameState from store... we have `players` but not `config` in destructured vars?
+                // `gameState` is `useGameStore()`.
+                const config = gameState.config;
+                // Need to handle WOLF_KING / BEAUTY for Werewolf action?
+                // Simplified:
+                let roleExists = false;
+                PRIVATE_PHASES[candidate]!.forEach(r => {
+                    if (config.roles[r] > 0) roleExists = true;
+                    // Special: Wolf Action always exists if Wolves exist (they always do)
+                });
+
+                if (!roleExists) {
+                    continue; // Skip if role not in board
+                }
+
+                // Check if I should participate
+                if (!shouldParticipate(candidate)) {
+                    continue; // Skip if I'm not this role
+                }
+            }
+
+            // If we get here, it's a valid phase
+            setPhase(candidate);
+            found = true;
             return;
         }
 
-        if (phase === 'ELECTION') {
-            setPhase('DEATH_ANNOUNCE');
-            return;
-        }
-
+        // Fallback for Manual Boundaries (if not caught in loop)
         if (phase === 'EXILE_SPEECH') {
-            // End of Day -> Start of Night (Next Day)
             incrementDay();
             setPhase('NIGHT_START');
             return;
-        }
-
-        // Standard Sequential Handling for others
-        const currentIndex = PHASE_ORDER.indexOf(phase);
-        if (currentIndex >= 0 && currentIndex < PHASE_ORDER.length - 1) {
-            setPhase(PHASE_ORDER[currentIndex + 1]);
         }
     };
 
     const [isSaving, setIsSaving] = useState(false); // Block UI during flush
 
     const handleAction = async (
-        action: 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION' | 'TOGGLE_CAMPAIGN' | 'QUIT_ELECTION' | 'SET_MIXBLOOD_TARGET',
+        action: 'KILL' | 'REVIVE' | 'SHERIFF' | 'SHERIFF_LOST' | 'RECORD' | 'MARK_TEAMMATE' | 'MARK_ROLE' | 'TOGGLE_TAG' | 'SELF_DESTRUCT' | 'ADD_RELATION' | 'TOGGLE_CAMPAIGN' | 'QUIT_ELECTION'
+            | 'SET_MIXBLOOD_TARGET'
+            | 'WITCH_SAVE'
+            | 'WITCH_POISON'
+            | 'GUARD_PROTECT'
+            | 'WOLF_KILL',
         payload?: any,
         targetId?: string // Optional target ID to override selectedPlayerId
     ) => {
@@ -363,6 +485,18 @@ export default function GameInterface() {
             case 'SET_MIXBLOOD_TARGET':
                 gameState.setMixbloodTarget(id);
                 break;
+            case 'WITCH_SAVE':
+                gameState.useWitchMedic(id);
+                break;
+            case 'WITCH_POISON':
+                gameState.useWitchPoison(id);
+                break;
+            case 'GUARD_PROTECT':
+                gameState.guardPlayer(id);
+                break;
+            case 'WOLF_KILL':
+                gameState.markWolfKill(id);
+                break;
         }
         if (!isRecording) setSelectedPlayerId(null);
     };
@@ -377,6 +511,19 @@ export default function GameInterface() {
             setShowPermissionPrompt(false);
         } else {
             setMicPermission('denied');
+        }
+    };
+
+    // [NEW] Copy Debug Info
+    const handleCopyDebugInfo = () => {
+        if (!debugInfo) return;
+        try {
+            const text = JSON.stringify(debugInfo, null, 2);
+            navigator.clipboard.writeText(text);
+            alert("调试信息已复制到剪贴板！\n(包含原始上下文与 AI 分析结果)");
+        } catch (e) {
+            console.error("Copy failed", e);
+            alert("复制失败");
         }
     };
 
@@ -561,6 +708,16 @@ export default function GameInterface() {
                                         <RefreshCw size={12} />
                                     </button>
                                 )}
+                                {/* Debug Button */}
+                                {debugInfo && (
+                                    <button
+                                        onClick={handleCopyDebugInfo}
+                                        className="p-1 hover:bg-slate-800 rounded text-slate-600 hover:text-amber-400 transition-colors"
+                                        title="复制调试信息 (Bug Report)"
+                                    >
+                                        <Bug size={12} />
+                                    </button>
+                                )}
                             </h3>
                             <div className="flex items-center gap-2">
                                 <span className="text-xs text-slate-400">胜率预测</span>
@@ -691,6 +848,26 @@ export default function GameInterface() {
                                         <span className="text-sm font-bold">当选警长</span>
                                     </button>
 
+                                    {/* Wolf Kill Action */}
+                                    {['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(players.find(p => p.id === myPlayerId)?.role || '') &&
+                                        ['NIGHT_START', 'WEREWOLF_ACTION'].includes(phase) &&
+                                        selectedPlayerId !== myPlayerId && (
+                                            <button
+                                                onClick={() => handleAction('WOLF_KILL')}
+                                                className={clsx(
+                                                    "flex flex-col items-center justify-center p-4 rounded-xl gap-2 transition-all col-span-2 md:col-span-1",
+                                                    skillState.wolfKillTargetId === selectedPlayer.id
+                                                        ? "bg-red-600 text-white border border-red-400"
+                                                        : "bg-slate-800 hover:bg-slate-700 text-red-500"
+                                                )}
+                                            >
+                                                <Target size={24} className={skillState.wolfKillTargetId === selectedPlayer.id ? "fill-current" : ""} />
+                                                <span className="text-sm font-bold">
+                                                    {skillState.wolfKillTargetId === selectedPlayer.id ? '已锁定 (狼刀)' : '狼队锁刀'}
+                                                </span>
+                                            </button>
+                                        )}
+
                                     {/* Mark Teammate (Only for Wolves) */}
                                     {['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(players.find(p => p.id === myPlayerId)?.role || '') && selectedPlayerId !== myPlayerId && (
                                         <button
@@ -788,6 +965,57 @@ export default function GameInterface() {
                                         </button>
                                     </div>
 
+                                    {/* Witch Actions */}
+                                    {players.find(p => p.id === myPlayerId)?.role === 'WITCH' && selectedPlayer.status !== 'EXILED' && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800 grid grid-cols-2 gap-3">
+                                            <button
+                                                onClick={() => handleAction('WITCH_SAVE', selectedPlayer.id)}
+                                                disabled={gameState.skillState?.witchMedicUsed}
+                                                className={clsx(
+                                                    "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    gameState.skillState?.witchMedicUsed ? "bg-slate-800 text-slate-600 cursor-not-allowed" : "bg-emerald-900/50 text-emerald-400 hover:bg-emerald-900 border border-emerald-900"
+                                                )}
+                                            >
+                                                <Heart size={18} />
+                                                {gameState.skillState?.witchMedicUsed ? '解药已用' : '使用解药'}
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    if (confirm(`确定要毒杀 ${selectedPlayer.number} 号玩家吗？`)) {
+                                                        handleAction('WITCH_POISON', selectedPlayer.id);
+                                                    }
+                                                }}
+                                                disabled={gameState.skillState?.witchPoisonUsed}
+                                                className={clsx(
+                                                    "flex items-center justify-center p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    gameState.skillState?.witchPoisonUsed ? "bg-slate-800 text-slate-600 cursor-not-allowed" : "bg-purple-900/50 text-purple-400 hover:bg-purple-900 border border-purple-900"
+                                                )}
+                                            >
+                                                <FlaskRound size={18} />
+                                                {gameState.skillState?.witchPoisonUsed ? '毒药已用' : '使用毒药'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Guard Actions */}
+                                    {players.find(p => p.id === myPlayerId)?.role === 'GUARD' && selectedPlayer.status === 'ALIVE' && (
+                                        <div className="col-span-2 pt-2 border-t border-slate-800">
+                                            <button
+                                                onClick={() => handleAction('GUARD_PROTECT', selectedPlayer.id)}
+                                                disabled={gameState.skillState?.guardLastProtectId === selectedPlayer.id}
+                                                className={clsx(
+                                                    "flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm",
+                                                    gameState.skillState?.guardLastProtectId === selectedPlayer.id
+                                                        ? "bg-slate-800 text-slate-600 cursor-not-allowed"
+                                                        : "bg-blue-900/50 text-blue-400 hover:bg-blue-900 border border-blue-900"
+                                                )}
+                                            >
+                                                <Shield size={18} />
+                                                {gameState.skillState?.guardLastProtectId === selectedPlayer.id ? '昨晚已守' : '今晚守护'}
+                                            </button>
+                                        </div>
+                                    )}
+
                                     {/* Wolf Actions (Suicide) */}
                                     {selectedPlayer.status === 'ALIVE' && (
                                         <div className="col-span-2 pt-2 border-t border-slate-800">
@@ -800,10 +1028,38 @@ export default function GameInterface() {
                                                 className="flex items-center justify-center w-full p-3 rounded-xl gap-2 transition-all font-bold text-sm bg-slate-800 text-red-500 hover:bg-red-900/20 hover:text-red-400"
                                             >
                                                 <Skull size={18} />
-                                                狼人自爆
+                                                爆狼 / 自爆
                                             </button>
                                         </div>
                                     )}
+
+                                    {/* Mark Public Role (Idiot, Hunter, etc.) */}
+                                    <div className="col-span-2 pt-2 border-t border-slate-800">
+                                        <h5 className="text-xs text-slate-500 font-bold mb-2">标记明牌身份</h5>
+                                        <div className="grid grid-cols-3 gap-2">
+                                            {[
+                                                { role: 'IDIOT', label: '白痴' },
+                                                { role: 'HUNTER', label: '猎人' },
+                                                { role: 'WOLF_KING', label: '狼王' },
+                                                { role: 'BEAUTY_WOLF', label: '狼美人' },
+                                                { role: 'MIXBLOOD', label: '混血儿' },
+                                                { role: 'GUARD', label: '守卫' }
+                                            ].map(({ role, label }) => (
+                                                <button
+                                                    key={role}
+                                                    onClick={() => handleAction('MARK_ROLE', selectedPlayer.markedRole === role ? null : role)}
+                                                    className={clsx(
+                                                        "px-2 py-2 rounded text-xs font-bold border transition-colors",
+                                                        selectedPlayer.markedRole === role
+                                                            ? "bg-violet-600 text-white border-violet-500 shadow-lg shadow-violet-500/20"
+                                                            : "bg-slate-800 text-slate-400 border-slate-700 hover:border-slate-500 hover:text-slate-200"
+                                                    )}
+                                                >
+                                                    {label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
 
                                     {/* Sheriff Transfer Logic */}
                                     {gameState.sheriffId && (
@@ -942,6 +1198,18 @@ export default function GameInterface() {
                                                             <button
                                                                 onClick={() => {
                                                                     gameState.updateLog(log.id, editText);
+                                                                    // [NEW] Auto-update AI summary
+                                                                    gameState.updateLogSummary(log.id, '正在重新生成摘要...');
+                                                                    summarizeSpeech(editText.trim()).then(summary => {
+                                                                        if (summary && summary !== editText.trim()) {
+                                                                            gameState.updateLogSummary(log.id, summary);
+                                                                        } else {
+                                                                            gameState.updateLogSummary(log.id, ''); // Clear if no change
+                                                                        }
+                                                                    }).catch(err => {
+                                                                        console.error('Re-summarize failed:', err);
+                                                                        gameState.updateLogSummary(log.id, '摘要生成失败');
+                                                                    });
                                                                     setEditingLogId(null);
                                                                 }}
                                                                 className="px-4 py-1.5 bg-violet-600 hover:bg-violet-500 rounded text-white font-bold transition-colors shadow-lg shadow-violet-900/20"
@@ -965,9 +1233,9 @@ export default function GameInterface() {
                                     )}
                                 </div>
                             </div>
-                        </div>
-                    </div>
-                </div>
+                        </div >
+                    </div >
+                </div >
             )
             }
 

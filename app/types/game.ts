@@ -17,6 +17,7 @@ export type GamePhase =
   | 'SEER_ACTION' // Seer checks
   | 'WITCH_ACTION' // Witch saves/poisons
   | 'HUNTER_ACTION' // Hunter check status (passive)
+  | 'GUARD_ACTION' // Guard protects
   | 'DAY_START' // Day breaks
   | 'DEATH_ANNOUNCE' // Announce deaths
   | 'ELECTION' // Sheriff election
@@ -62,11 +63,12 @@ export interface GameLog {
 
 export interface GameRelation {
   id: string;
-  type: 'SHOOT' | 'SHERIFF_TRANSFER' | 'SHERIFF_LOST' | 'VOTE';
-  sourceId: string; // Shooter, Previous Sheriff, or Voter
-  targetId?: string; // Victim, Next Sheriff, or Vote Target (undefined if LOST or ABSTAIN)
+  type: 'SHOOT' | 'SHERIFF_TRANSFER' | 'SHERIFF_LOST' | 'VOTE' | 'WITCH_SAVE' | 'WITCH_POISON' | 'GUARD_PROTECT' | 'WOLF_KILL';
+  sourceId: string; // Shooter, Previous Sheriff, Voter, Witch, Guard, Wolf
+  targetId?: string; // Victim, Next Sheriff, Vote Target
   day: number; // The game day this occurred
   phase?: GamePhase; // The phase this occurred (e.g. ELECTION vs VOTE)
+  round?: number; // Voting round (default 1, increases on PK)
   timestamp: number;
 }
 
@@ -75,6 +77,14 @@ export interface ASRState {
   model: string;
   status: 'READY' | 'RECORDING' | 'PROCESSING' | 'ERROR';
   errorMessage?: string;
+}
+
+export interface SkillState {
+  witchMedicUsed: boolean;
+  witchPoisonUsed: boolean;
+  guardLastProtectId: string | null;
+  hunterStatus: 'CAN_SHOOT' | 'CANNOT_SHOOT' | 'UNKNOWN';
+  wolfKillTargetId: string | null; // New: Wolf kill target
 }
 
 export interface GameState {
@@ -91,6 +101,8 @@ export interface GameState {
   logs: GameLog[];
   myPlayerId: string | null; // The user's own player ID
   sheriffId: string | null;
+  currentVoteRound: number; // Current voting round (1, 2, 3...)
+  skillState: SkillState; // New: Track special role skills
   asrState: ASRState; // Current ASR status
   createdAt: number;
 }
