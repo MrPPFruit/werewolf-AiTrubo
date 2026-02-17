@@ -137,7 +137,7 @@ export default function GameSetup() {
 
             {/* Version Display */}
             <div className="absolute top-4 right-4 text-slate-500 font-mono text-xs opacity-50">
-                V0.1.1
+                V0.2.2
             </div>
 
             <div className="grid md:grid-cols-12 gap-8">

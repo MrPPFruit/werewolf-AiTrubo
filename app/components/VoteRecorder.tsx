@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { useGameStore } from '@/app/store/gameStore';
 import { Player } from '@/app/types/game';
-import { Check, X, ArrowLeft } from 'lucide-react';
+import { Check, X, ArrowLeft, RotateCcw } from 'lucide-react';
 import clsx from 'clsx';
 
 interface VoteRecorderProps {
@@ -29,10 +29,8 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
         title = "警长竞选投票";
         // Candidates: Campaigning and NOT quit
         targets = players.filter(p => p.isCampaigning && !p.hasQuitElection);
-        // Voters: Alive and NOT currently campaigning (those who quit CAN vote usually)
-        // strict rule: only those NOT on list of candidates can vote?
-        // Usually, those who quit election become voters.
-        voters = players.filter(p => p.status === 'ALIVE' && !p.isCampaigning);
+        // Voters: Only 警下 players (not campaigning AND not quit election)
+        voters = players.filter(p => p.status === 'ALIVE' && !p.isCampaigning && !p.hasQuitElection);
     }
 
     // Sheriff Organization State
@@ -44,12 +42,11 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
         if (selectedTargets.length > 0) {
             organizeVote(selectedTargets);
             setSelectedTargets([]); // Clear after organizing
-            alert('归票成功！已在日志中记录。');
         }
     };
 
     return (
-        <div className="turbo-card p-4 flex flex-col gap-4 h-full">
+        <div className="turbo-card p-4 flex flex-col gap-3 h-full overflow-hidden">
             <h3 className="text-sm font-bold text-amber-500 border-b border-slate-800 pb-2 flex justify-between items-center shrink-0">
                 <div className="flex items-center gap-2">
                     {onClose && (
@@ -66,8 +63,8 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
 
             {/* Sheriff Phase - Next Round Button (PK) */}
             {mode === 'SHERIFF' && todaysVotes.length > 0 && (
-                <div className="mb-2 flex justify-between items-center bg-slate-800/30 p-2 rounded">
-                    <span className="text-xs text-slate-500 font-mono">当前轮次: Round {currentVoteRound}</span>
+                <div className="flex justify-between items-center bg-slate-800/30 p-1.5 rounded shrink-0">
+                    <span className="text-xs text-slate-500 font-mono">Round {currentVoteRound}</span>
                     <button
                         onClick={() => {
                             if (confirm('确定要开启下一轮 PK 投票吗？')) {
@@ -77,14 +74,14 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
                         className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 bg-amber-900/30 px-2 py-1 rounded border border-amber-900/50"
                     >
                         <RotateCcw size={12} />
-                        进入下一轮 (PK)
+                        下一轮 (PK)
                     </button>
                 </div>
             )}
 
             {/* Sheriff Organization UI (Only visible to Sheriff during Exile Vote) */}
             {isSheriff && isVotePhase && (
-                <div className="bg-amber-950/30 p-3 rounded-lg border border-amber-600/30 mb-2 shrink-0">
+                <div className="bg-amber-950/30 p-2 rounded-lg border border-amber-600/30 shrink-0">
                     <h4 className="text-xs font-bold text-amber-500 mb-2 flex justify-between items-center">
                         <span>警长归票 (多选)</span>
                         <button
@@ -120,7 +117,7 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
                 </div>
             )}
 
-            <div className="flex-1 overflow-y-auto space-y-2 pr-2 min-h-0">
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-[120px]">
                 {voters.length === 0 ? (
                     <div className="text-center text-slate-500 py-8">
                         没有符合条件的投票者
@@ -187,11 +184,11 @@ export default function VoteRecorder({ mode = 'EXILE', onClose }: VoteRecorderPr
             </div>
 
             {/* Summary / Result Preview */}
-            <div className="bg-slate-950 p-3 rounded-lg text-xs text-slate-400 shrink-0 border border-slate-800">
-                <div className="font-bold mb-2 text-slate-500 flex justify-between">
-                    <span>当前票型统计</span>
+            <div className="bg-slate-950 p-2 rounded-lg text-xs text-slate-400 shrink-0 border border-slate-800 max-h-[25%] overflow-y-auto">
+                <div className="font-bold mb-1 text-slate-500">
+                    票型统计
                 </div>
-                <div className="space-y-1 max-h-32 overflow-y-auto">
+                <div className="space-y-0.5">
                     {(() => {
                         const counts: Record<string, string[]> = {};
                         const abstain: string[] = [];

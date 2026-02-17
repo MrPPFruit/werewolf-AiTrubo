@@ -515,15 +515,29 @@ export default function GameInterface() {
     };
 
     // [NEW] Copy Debug Info
-    const handleCopyDebugInfo = () => {
+    const handleCopyDebugInfo = async () => {
         if (!debugInfo) return;
+        const text = JSON.stringify(debugInfo, null, 2);
         try {
-            const text = JSON.stringify(debugInfo, null, 2);
-            navigator.clipboard.writeText(text);
+            await navigator.clipboard.writeText(text);
             alert("调试信息已复制到剪贴板！\n(包含原始上下文与 AI 分析结果)");
         } catch (e) {
-            console.error("Copy failed", e);
-            alert("复制失败");
+            // Fallback for "Document is not focused" error
+            try {
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert("调试信息已复制到剪贴板！");
+            } catch (e2) {
+                console.error("Copy failed", e2);
+                alert("复制失败，请手动复制");
+            }
         }
     };
 
@@ -610,6 +624,8 @@ export default function GameInterface() {
                                             sourceNumber: players.find(p => p.id === r.sourceId)?.number
                                         }))}
                                         isMixbloodTarget={players.find(p => p.id === myPlayerId)?.mixbloodTargetId === player.id}
+                                        isWolfKillTarget={skillState.wolfKillTargetId === player.id}
+                                        isElectionPhase={phase === 'ELECTION'}
                                     />
                                     {/* Wolf Probability Badge - REMOVED here, moved to PlayerCard or kept simple? 
                                         Let's keep the simple badge for top level view, but maybe use the new probabilities?
@@ -692,7 +708,7 @@ export default function GameInterface() {
                 <div className="flex flex-col gap-4 overflow-hidden h-full min-h-0">
 
                     {/* AI Analysis Panel */}
-                    <div className="turbo-card p-4 shrink-0 flex flex-col gap-2 max-h-[30vh] overflow-y-auto">
+                    <div className="turbo-card p-3 shrink-0 flex flex-col gap-2 max-h-[20vh] overflow-y-auto">
                         <div className="flex justify-between items-center sticky top-0 bg-slate-900/90 pb-2 z-10 border-b border-slate-800 mb-2">
                             <h3 className="text-sm font-bold text-violet-400 flex items-center gap-2">
                                 <BrainCircuit size={16} />
@@ -828,7 +844,21 @@ export default function GameInterface() {
                                         disabled={selectedPlayer.status === 'DEAD'}
                                     >
                                         <Skull size={24} />
-                                        <span className="text-sm font-bold">标记死亡/放逐</span>
+                                        <span className="text-sm font-bold">标记死亡</span>
+                                        <span className="text-[10px] text-slate-500">夜晚击杀/毒杀</span>
+                                    </button>
+
+                                    <button
+                                        onClick={() => {
+                                            gameState.exilePlayer(selectedPlayer.id);
+                                            setSelectedPlayerId(null);
+                                        }}
+                                        className="flex flex-col items-center justify-center p-4 bg-slate-800 hover:bg-slate-700 rounded-xl gap-2 text-orange-400 transition-colors"
+                                        disabled={selectedPlayer.status === 'DEAD'}
+                                    >
+                                        <X size={24} />
+                                        <span className="text-sm font-bold">放逐出局</span>
+                                        <span className="text-[10px] text-slate-500">白痴自动翻牌不死</span>
                                     </button>
 
                                     <button

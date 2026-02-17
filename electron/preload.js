@@ -45,4 +45,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // System Audio
     getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
+
+    // Game Log File Writer
+    saveGameLog: (filename, content) => ipcRenderer.invoke('save-game-log', { filename, content }),
 });

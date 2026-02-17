@@ -1,6 +1,7 @@
 import { GameState, Role } from "@/app/types/game";
 import { startVoskRecording, stopVoskRecording } from './voskService';
 import dictionary from '@/app/config/dictionary.json';
+import { logAIAnalysis } from './aiLogger';
 
 // Type declaration for Electron API
 interface VoskResult {
@@ -311,7 +312,7 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
         };
     }
 
-    // [NEW] Night Action Extraction (Who was poisoned/saved?)
+    // [NEW] Night Action Extraction
     const nightActions = {
         witchSave: gameState.players.find(p =>
             gameState.relations.some(r => r.type === 'WITCH_SAVE' && r.targetId === p.id)
@@ -327,216 +328,216 @@ export const analyzeGameState = async (gameState: GameState): Promise<{
         )?.number
     };
 
-    // Prepare Context
-    // Simplistic context serialization
-    const context = {
-        gameConfig: gameState.config, // [NEW] Inject Board Configuration
-        myPlayerId: gameState.myPlayerId,
-        day: gameState.day,
-        phase: gameState.phase,
-        skillState: gameState.skillState, // [NEW] Send Skill Usage State
-        nightActions, // [NEW] Send Night Actions
-        players: gameState.players.map(p => ({
-            id: p.id,
-            number: p.number,
-            status: p.status,
-            isSheriff: p.isSheriff,
-            tags: p.tags, // Action tags like 'SHOOTER'
-            // Only send role if it's ME or known (e.g. revealed) - logic typically in store but here we trust current state
-            role: p.id === gameState.myPlayerId ? p.role : undefined,
-            isMarkedTeammate: p.isMarkedTeammate, // [NEW] Send Teammate Mark to AI
-            markedRole: p.markedRole, // [NEW] Send User's subjective mark (Good/Bad/Role) to AI
-            // [NEW] Election Status
-            isCampaigning: p.isCampaigning,
-            hasQuitElection: p.hasQuitElection,
-            // [NEW] Mixblood Logic (Only if I am Mixblood)
-            mixbloodTargetId: (gameState.myPlayerId && p.id === gameState.myPlayerId) ? p.mixbloodTargetId : undefined,
-            // [NEW] Public/Revealed Role Logic (e.g. Idiot)
-            // If player is IDIOT and is explicitly marked EXILED or DEAD but known...
-            // Simplified: If user marked them as IDIOT, it's covered by `markedRole`.
-            // But if it's "Game Logic" revealed (like Idiot voted out), we should auto-detect.
-            // For now, simpler to rely on `markedRole` OR if we can check logs for "Identity Revealed".
-            // Let's rely on specific check:
-            publicRole: (() => {
-                // Auto-detect public role from logs (e.g. "Idiot revealed")
-                // Simplistic check: if logs contain "白痴" and "翻牌" for this player?
-                // Start with empty, relies on AI reading logs for now, OR better:
-                // In Turbo, an exiled Idiot might not die.
-                if (p.role === 'IDIOT' && p.status === 'EXILED') return 'IDIOT';
-                return undefined;
-            })()
-        })),
-        // [NEW] Structured Vote History
-        voteHistory: gameState.relations
-            .filter(r => r.type === 'VOTE')
-            .map(r => ({
-                day: r.day,
-                phase: r.phase,
-                round: r.round, // [NEW] Send Round info
-                source: r.sourceId,
-                target: r.targetId || 'ABSTAIN'
-            })),
-        // Filter recent logs (last 2 days maybe? or all relevant ones)
-        // Ideally we prioritize logs with summaries
-        logs: gameState.logs.filter(l => ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type)).map(l => ({
-            day: l.day,
-            type: l.type,
-            source: l.sourcePlayerId,
-            target: l.targetPlayerId,
-            content: l.summary || l.message // Use summary if available!
-        }))
+    // Helper: player id → number
+    const idToNum = (id: string | undefined) => {
+        if (!id) return null;
+        const p = gameState.players.find(pl => pl.id === id);
+        return p ? p.number : null;
     };
 
-    // [NEW] Wolf Logic Optimization - Board Aware
-    let systemInstructionAppendix = "";
+    // === Build Timeline (unified, deduplicated) ===
+    const timeline = [];
+    for (let d = 1; d <= gameState.day; d++) {
+        const events: any[] = [];
 
-    // Check if I am a wolf
+        // Logs for this day
+        gameState.logs
+            .filter(l => l.day === d && ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type))
+            .forEach(l => {
+                events.push({
+                    类型: l.type === 'SPEECH' ? '发言' : l.type === 'VOTE' ? '投票' : l.type === 'DEATH' ? '死亡' : '行动',
+                    阶段: l.phase,
+                    来源: idToNum(l.sourcePlayerId),
+                    目标: idToNum(l.targetPlayerId),
+                    内容: l.summary || l.message
+                });
+            });
+
+        // Votes for this day
+        gameState.relations
+            .filter(r => r.type === 'VOTE' && r.day === d)
+            .forEach(r => {
+                events.push({
+                    类型: '投票记录',
+                    阶段: r.phase,
+                    轮次: r.round || 1,
+                    投票人: idToNum(r.sourceId),
+                    目标: r.targetId ? idToNum(r.targetId) : '弃票'
+                });
+            });
+
+        timeline.push({ 天数: d, 事件: events });
+    }
+
+    // === Build Player List (number-based, no redundant IDs) ===
+    const playerList = gameState.players.map(p => {
+        const info: any = {
+            号码: p.number,
+            状态: p.status === 'ALIVE' ? '存活' : p.status === 'DEAD' ? '死亡' : '放逐',
+        };
+        if (p.isSheriff) info.警长 = true;
+        if (p.tags?.length) info.标签 = p.tags;
+        if (p.id === gameState.myPlayerId && p.role) info.身份 = p.role;
+        if (p.isMarkedTeammate) info.已知狼队友 = true;
+        if (p.markedRole) info.标记 = p.markedRole;
+        if (p.isCampaigning) info.竞选中 = true;
+        if (p.hasQuitElection) info.已退水 = true;
+
+        // Public role (auto-detected)
+        const pubRole = (() => {
+            if (p.role === 'IDIOT' && p.status === 'EXILED') return '白痴(已翻牌)';
+            if (p.tags?.includes('SHOOTER') && (p.status === 'DEAD' || p.status === 'EXILED')) {
+                const hasHunter = (gameState.config.roles['HUNTER'] || 0) > 0;
+                const hasWolfKing = (gameState.config.roles['WOLF_KING'] || 0) > 0;
+                if (hasHunter && !hasWolfKing) return '猎人(已开枪)';
+                if (!hasHunter && hasWolfKing) return '狼王(已开枪)';
+                if (p.isMarkedTeammate || p.markedRole === 'BAD') return '狼王(已开枪)';
+                if (p.markedRole === 'GOOD' || p.markedRole === 'SILVER') return '猎人(已开枪)';
+                return '猎人或狼王(已开枪)';
+            }
+            return undefined;
+        })();
+        if (pubRole) info.已公开身份 = pubRole;
+
+        // Previous analysis (for continuity)
+        if (p.analysis) info.上次分析 = p.analysis;
+
+        // Mixblood
+        if (gameState.myPlayerId && p.id === gameState.myPlayerId && p.mixbloodTargetId) {
+            info.混血儿榜样 = idToNum(p.mixbloodTargetId);
+        }
+
+        return info;
+    });
+
+    // === Role Config (readable) ===
+    const roleNames: Record<string, string> = {
+        VILLAGER: '村民', WEREWOLF: '狼人', SEER: '预言家', WITCH: '女巫',
+        HUNTER: '猎人', GUARD: '守卫', IDIOT: '白痴', WOLF_KING: '狼王',
+        BEAUTY_WOLF: '美人狼', MIXBLOOD: '混血儿'
+    };
+    const roleConfig: Record<string, number> = {};
+    Object.entries(gameState.config.roles).forEach(([role, count]) => {
+        if (count > 0) roleConfig[roleNames[role] || role] = count;
+    });
+
+    // === Wolf Perspective Appendix ===
     const myRole = gameState.players.find(p => p.id === gameState.myPlayerId)?.role;
     const isWolf = ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(myRole as string);
 
+    let wolfAppendix = "";
     if (isWolf) {
-        // 1. Identify my known teammates
         const teammates = gameState.players.filter(p =>
             p.id !== gameState.myPlayerId &&
             ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(p.role as string)
         ).map(p => `${p.number}号`);
 
-        // 2. Check Board Configuration for Special Roles
         const hasMixblood = (gameState.config.roles['MIXBLOOD'] || 0) > 0;
-        // const hasMechWolf = (gameState.config.roles['MECHANICAL_WOLF'] || 0) > 0; // Future support
+        const teammateStr = teammates.length > 0 ? `已知狼队友: [${teammates.join(', ')}]` : '无已知队友';
 
-        let teammateInfo = "";
-        if (teammates.length > 0) {
-            teammateInfo = `你已知的狼队友是 [${teammates.join(', ')}]。`;
-        } else {
-            teammateInfo = `你不认识任何队友（可能是孤狼或队友已死）。`;
-        }
-
-        let unknownFactorWarning = "";
-        if (hasMixblood) {
-            unknownFactorWarning = `
-            **注意：板子包含【混血儿】。**
-            虽然除队友外的玩家大部分是好人，但其中可能混有以狼人为榜样的混血儿（属于狼队）。
-            因此，**不要绝对排除**场上存在未知狼队成员的可能性。`;
-        } else {
-            // Standard Game: No hidden wolves
-            unknownFactorWarning = `
-            **在当前板子下，狼队没有隐藏成员。**
-            因此，**除队友外的所有其他玩家**，其为狼人的概率应视为 **0%**。
-            请专注于分析这些“好人”的具体身份（神职还是平民）。`;
-        }
-
-        systemInstructionAppendix = `
-            **狼人视角特殊规则：**
-            玩家本人是狼人。${teammateInfo}
-            ${unknownFactorWarning}`;
+        wolfAppendix = `
+## ⚠️ 狼人视角特殊规则
+你是狼人阵营。${teammateStr}。
+${hasMixblood
+                ? '注意: 板子含混血儿，可能存在未知的狼阵营成员。'
+                : '当前板子无隐藏狼队成员，除已知队友外所有人的"狼人"概率必须为 0%。'}`;
     }
 
+    // === Night Actions (readable) ===
+    const nightInfo: string[] = [];
+    if (nightActions.wolfKill) nightInfo.push(`狼刀目标: ${nightActions.wolfKill}号`);
+    if (nightActions.witchSave) nightInfo.push(`女巫救药: ${nightActions.witchSave}号`);
+    if (nightActions.witchPoison) nightInfo.push(`女巫毒药: ${nightActions.witchPoison}号`);
+    if (nightActions.guardProtect) nightInfo.push(`守卫守护: ${nightActions.guardProtect}号`);
 
-    // 3. Structured Input: Timeline Grouping
-    // Group logs and votes by Day/Phase to help AI understand causality
-    const timeline = [];
-    const maxDay = gameState.day;
-
-    for (let d = 1; d <= maxDay; d++) {
-        const dayEvents = [];
-
-        // Add Logs for this day
-        const dayLogs = gameState.logs
-            .filter(l => l.day === d && ['SPEECH', 'VOTE', 'DEATH', 'ACTION'].includes(l.type))
-            .map(l => ({
-                type: 'LOG',
-                phase: l.phase,
-                source: l.sourcePlayerId,
-                target: l.targetPlayerId,
-                content: l.summary || l.message
-            }));
-        dayEvents.push(...dayLogs);
-
-        // Add Votes for this day
-        const dayVotes = gameState.relations
-            .filter(r => r.type === 'VOTE' && r.day === d)
-            .map(r => ({
-                type: 'VOTE_RECORD',
-                phase: r.phase,
-                round: r.round, // [NEW] Send Round info
-                source: r.sourceId,
-                target: r.targetId || 'ABSTAIN'
-            }));
-        dayEvents.push(...dayVotes);
-
-        // Sort by phase priority if needed, or just append
-        timeline.push({
-            day: d,
-            events: dayEvents
-        });
+    // === Skill State (readable) ===
+    const skillInfo: string[] = [];
+    if (gameState.skillState.witchMedicUsed) skillInfo.push('女巫救药已使用');
+    if (gameState.skillState.witchPoisonUsed) skillInfo.push('女巫毒药已使用');
+    if (gameState.skillState.hunterStatus !== 'UNKNOWN') {
+        skillInfo.push(`猎人状态: ${gameState.skillState.hunterStatus === 'CAN_SHOOT' ? '可以开枪' : '不能开枪'}`);
     }
 
-    // Enhance context with timeline
+    // === Build Enhanced Context ===
     const enhancedContext = {
-        ...context,
-        timeline, // [NEW] Structured Timeline
-        // logs: context.logs // optionally remove flat logs to save tokens, or keep for redundancy. Let's keep specific recent ones if needed, but timeline is better.
-        // We can remove 'logs' and 'voteHistory' from the root if we trust timeline.
-        // Let's keep 'voteHistory' as a quick lookup summary, but 'timeline' is the main story.
+        角色配置: roleConfig,
+        人数: gameState.config.playerCount,
+        当前天数: gameState.day,
+        当前阶段: gameState.phase,
+        我的号码: idToNum(gameState.myPlayerId || undefined),
+        我的身份: myRole || '未知',
+        技能状态: skillInfo.length > 0 ? skillInfo : undefined,
+        今夜行动: nightInfo.length > 0 ? nightInfo : undefined,
+        玩家列表: playerList,
+        时间线: timeline,
     };
 
+    // === All roles in game (for probability constraint) ===
+    const allRoles = Object.entries(gameState.config.roles)
+        .filter(([, count]) => count > 0)
+        .map(([role]) => role)
+        .join(', ');
+
+    // === System Prompt (全中文) ===
     const messages = [
         {
             role: 'system',
-            content: `You are an expert Werewolf game analyst. Analyze the game state based on the provided JSON context.
+            content: `你是一位顶尖的狼人杀比赛分析师。根据我提供的 JSON 游戏数据，进行逻辑推理并输出分析结果。
 
-# Input Data
-- **gameConfig**: Rules and Roles.
-- **players**: Status, tags, and KNOWN identities (role, isMarkedTeammate, markedRole).
-- **timeline**: Chronological events (Speech, Votes, Deaths).
+# 输入数据说明
+- **角色配置**: 当前板子中包含的角色和数量
+- **玩家列表**: 每个玩家的状态和已知信息
+- **时间线**: 按天分组的事件（发言、投票、死亡等）
+- **技能状态**: 女巫药水、守卫守护等使用情况
+- **今夜行动**: 本夜的具体操作目标
 
-# Critical Rules
-1. **Board Configuration**: Analyze ONLY based on \`gameConfig\`. Do not hallucinate roles not in the game.
-2. **Known Facts**: 
-    - \`myPlayerId\` is YOU. \`role\` is your card.
-    - \`markedRole\` (GOOD/BAD/Role) provided by the user is **ABSOLUTE TRUTH**.
-    - \`publicRole\` (e.g. IDIOT revealed) is **ABSOLUTE TRUTH**.
-    - \`skillState\` reflects the usage of special abilities (Witch's potions, Guard's protect).
-    - \`nightActions\` reveals who was targeted by special abilities (Witch/Guard). USE THIS!
-4. **Wolf Perspective** (If you are Wolf):
-    - You know your teammates.
-    - Unless \`MIXBLOOD\` exists, any non-teammate has **0% Wolf Probability**.
-${systemInstructionAppendix}
+# 绝对事实（不可违反）
+1. **"标记"字段**是用户根据查验/救人等操作手动标记的，视为绝对真相:
+   - GOOD = 预言家查验为好人（金水）
+   - BAD = 预言家查验为坏人（查杀）
+   - SILVER = 女巫救过的人（银水）
+   - PROTECT = 守卫保护过的人
+2. **"已公开身份"**是因游戏事件自动翻牌的身份（如白痴被放逐翻牌），绝对真实
+3. **"已知狼队友"** = true 的玩家，其身份100%确定是狼人
+4. **"身份"字段**只出现在我自己身上，是我的真实角色
+5. 只分析角色配置中存在的角色，不要臆造不存在的角色
+${wolfAppendix}
 
-# Output Schema (TypeScript)
-You must output a JSON object satisfying this interface:
+# 分析维度（请按以下维度逐步推理）
+1. **事实回顾**: 目前谁死了？谁是警长？哪些技能已使用？
+2. **发言分析**: 各玩家发言的核心观点是什么？谁在踩谁？谁在保谁？
+3. **投票动机**: 投票行为是否与发言立场一致？异常投票暗示什么？
+4. **身份排除法**: 已确认身份的玩家排除后，剩余角色如何分配？
+5. **逻辑矛盾**: 是否存在多人同时跳同一身份？是否有与已知事实冲突的言论？
+6. **阵营分析**: 基于以上推理，划分"大概率好人"、"大概率狼人"、"待观察"三组
 
-\`\`\`typescript
-interface AnalysisResult {
-  // Step 1: Chain of Thought. (Output in Simplified Chinese)
-  // Synthesize the timeline. Who is suspicious? Who contradicted whom? 
-  // Why did someone vote that way? Link behaviors to roles.
-  // 200-300 words.
-  reasoning: string; 
+# 输出格式（JSON）
+输出一个 JSON 对象，结构如下：
 
-  // Step 2: Logical Contradictions (Output in Simplified Chinese)
-  // Explicitly list any hard logic conflicts (e.g. "Player 1 and 2 both claimed Seer").
-  logical_contradictions: string[];
-
-  // Step 3: Global Game State
-  winRate: number; // 0-100 (Good team win rate)
-  dangerAlert: string | null; // Immediate threats (e.g. "Game Point") (Output in Simplified Chinese)
-
-  // Step 4: Player Analysis
-  players: {
-    [playerId: string]: {
-      roleProbabilities: { [role in Role]?: number }; // e.g. { WEREWOLF: 60, SEER: 0 }
-      analysis: string; // Brief summary for this specific player (50 words) (Output in Simplified Chinese)
+{
+  "reasoning": "（300-500字的中文推理过程，按上述维度逐步分析）",
+  "logical_contradictions": ["矛盾1", "矛盾2"],
+  "winRate": 50,
+  "dangerAlert": "紧急警报文字 或 null",
+  "players": {
+    "p-1": {
+      "roleProbabilities": { "角色名": 概率 },
+      "analysis": "50字以内的中文分析"
     }
   }
 }
-\`\`\`
 
-# Output Format
-1. Return **ONLY** the raw JSON string. No markdown formatting.
-2. **ALL natural language text (reasoning, analysis, etc.) MUST BE IN SIMPLIFIED CHINESE.**
-3. **CRITICAL**: You MUST provide 'roleProbabilities' and 'analysis' for **EVERY** player in the 'players' list, even if they are dead or you are unsure. Do not omit any player.
+# 概率规则（严格遵守）
+1. 每个玩家的 roleProbabilities 中，所有概率之和必须**恰好等于 100**
+2. 必须覆盖当前板子所有存在的角色: [${allRoles}]
+3. 概率为 0 的角色也要写出来（写 0 即可）
+4. 已确认身份的玩家（标记/已公开身份/自己），对应角色概率设为 100，其余为 0
+5. players 的 key 使用 "p-号码" 格式（如 "p-1", "p-2"）
+
+# 输出要求
+1. 只输出原始 JSON 字符串，不要添加 markdown 格式标记
+2. 所有文字内容必须使用**简体中文**
+3. 必须为**每一个玩家**都给出分析，不能遗漏
 `
         },
         {
@@ -571,6 +572,16 @@ interface AnalysisResult {
             });
         }
 
+        // [AI Logger] Record successful analysis
+        logAIAnalysis({
+            day: gameState.day,
+            phase: gameState.phase,
+            input: enhancedContext,
+            messages,
+            rawOutput: rawJson,
+            parsed: aiData,
+        });
+
         return {
             analysis: aiData.reasoning || aiData.analysis || "AI分析完成", // Use reasoning as main analysis text
             probabilities,
@@ -582,6 +593,17 @@ interface AnalysisResult {
         };
 
     } catch (e) {
+        // [AI Logger] Record failed analysis
+        logAIAnalysis({
+            day: gameState.day,
+            phase: gameState.phase,
+            input: enhancedContext,
+            messages,
+            rawOutput: '',
+            parsed: null,
+            error: e instanceof Error ? e.message : String(e),
+        });
+
         console.error('[AI] Analysis Error:', e);
         return {
             analysis: "AI分析失败: " + (e instanceof Error ? e.message : String(e)),

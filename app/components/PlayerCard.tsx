@@ -14,9 +14,11 @@ interface PlayerCardProps {
     isRecording?: boolean;
     relations?: { id: string, type: string, sourceId: string, targetId?: string, sourceNumber?: number }[];
     isMixbloodTarget?: boolean;
+    isWolfKillTarget?: boolean;
+    isElectionPhase?: boolean;
 }
 
-export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget }: PlayerCardProps) {
+export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onToggleCampaign, onQuitElection, isRecording, relations, isMixbloodTarget, isWolfKillTarget, isElectionPhase }: PlayerCardProps) {
     const isDead = player.status === 'DEAD' || player.status === 'EXILED';
 
     // Sort probabilities
@@ -34,7 +36,9 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
                 "relative aspect-[3/4] rounded-xl border-2 transition-all cursor-pointer overflow-visible group hover:scale-105",
                 isMe
                     ? "border-violet-500 shadow-[0_0_15px_rgba(139,92,246,0.3)] bg-slate-900"
-                    : "border-slate-700 bg-slate-900/50 hover:border-slate-500",
+                    : isWolfKillTarget
+                        ? "border-red-600 shadow-[0_0_15px_rgba(220,38,38,0.4)] bg-slate-900 animate-pulse"
+                        : "border-slate-700 bg-slate-900/50 hover:border-slate-500",
                 isDead && "opacity-60 grayscale border-slate-800"
             )}
         >
@@ -121,8 +125,8 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
                         {/* Placeholder for Avatar */}
                         <span className="text-2xl opacity-20">?</span>
 
-                        {/* Election Status: Campaigning (Hand) */}
-                        {player.isCampaigning && !player.hasQuitElection && (
+                        {/* Election Status: Campaigning (Hand) - only during election */}
+                        {isElectionPhase && player.isCampaigning && !player.hasQuitElection && (
                             <div className="absolute -top-2 -right-2 bg-amber-500 rounded-full p-1 shadow-lg animate-bounce z-20">
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                     <path d="M12 2C13.1 2 14 2.9 14 4V11C14 11.55 13.55 12 13 12C12.45 12 12 11.55 12 11V7" stroke="white" strokeWidth="2" strokeLinecap="round" />
@@ -135,8 +139,8 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
                             </div>
                         )}
 
-                        {/* Election Status: Quit (Water Drop) */}
-                        {player.hasQuitElection && (
+                        {/* Election Status: Quit (Water Drop) - only during election */}
+                        {isElectionPhase && player.hasQuitElection && (
                             <div className="absolute -bottom-2 -right-2 bg-blue-500 rounded-full p-1 shadow-lg z-20">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
                                     <path d="M12 22C16.4183 22 20 18.4183 20 14C20 10 12 2 12 2C12 2 4 10 4 14C4 18.4183 7.58172 22 12 22Z" fill="white" />
@@ -238,6 +242,16 @@ export default function PlayerCard({ player, isMe, onClick, onQuickRecord, onTog
 
             {/* Speech Overlay REMOVED */}
             {/* latestSpeech prop is no longer used for display */}
+
+            {/* Wolf Kill Target Indicator */}
+            {isWolfKillTarget && !isDead && (
+                <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+                    <div className="bg-red-900/90 text-red-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-red-500 shadow-lg flex items-center gap-1">
+                        <Target size={10} className="text-red-400" />
+                        <span>狼刀</span>
+                    </div>
+                </div>
+            )}
 
             {/* Hitbox overlay for status effect */}
             {

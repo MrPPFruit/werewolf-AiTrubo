@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { GameState, Player, Role, GamePhase, GameLog, LogType, GameRelation } from '@/app/types/game';
+import { initAILogger } from '@/app/services/aiLogger';
 
 interface GameStore extends GameState {
     // Actions
@@ -11,6 +12,7 @@ interface GameStore extends GameState {
     updateLog: (id: string, message: string) => void;
     updateLogSummary: (id: string, summary: string) => void;
     killPlayer: (playerId: string) => void;
+    exilePlayer: (playerId: string) => void;
     revivePlayer: (playerId: string) => void;
     setSheriff: (playerId: string | null) => void;
     transferSheriff: (targetId: string | null) => void;
@@ -108,6 +110,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
             createdAt: Date.now(),
         });
 
+        // Initialize AI Logger for this game session
+        initAILogger(get().id, { playerCount, roles, templateId });
+
         get().addLog('SYSTEM', 'Game Started');
     },
 
@@ -173,6 +178,19 @@ export const useGameStore = create<GameStore>((set, get) => ({
         get().updatePlayer(playerId, { status: 'DEAD' });
         const p = get().players.find(p => p.id === playerId);
         get().addLog('DEATH', `玩家 ${p?.number} 号被标记死亡`, undefined, playerId);
+    },
+
+    exilePlayer: (playerId) => {
+        const p = get().players.find(p => p.id === playerId);
+        if (!p) return;
+        // 白痴被放逐翻牌不死，但失去投票权
+        if (p.role === 'IDIOT') {
+            get().updatePlayer(playerId, { status: 'EXILED' });
+            get().addLog('ACTION', `玩家 ${p.number} 号被放逐，翻牌白痴，不死但失去投票权`, undefined, playerId);
+        } else {
+            get().updatePlayer(playerId, { status: 'DEAD' });
+            get().addLog('DEATH', `玩家 ${p.number} 号被放逐出局`, undefined, playerId);
+        }
     },
 
     revivePlayer: (playerId) => {
@@ -323,30 +341,73 @@ export const useGameStore = create<GameStore>((set, get) => ({
     },
 
     updateProbabilities: (probabilities, analysisMap) =>
-        set((state) => ({
-            players: state.players.map((p) => {
-                let newProbs = probabilities[p.id] || p.roleProbabilities;
+        set((state) => {
+            // Pre-compute: which roles exist in this game config
+            const wolfRoles = ['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'];
+            const hasHunter = (state.config.roles['HUNTER'] || 0) > 0;
+            const hasWolfKing = (state.config.roles['WOLF_KING'] || 0) > 0;
 
-                // Override: Self
-                if (p.id === state.myPlayerId && p.role) {
-                    newProbs = { [p.role]: 100 };
-                }
-                // Override: Marked Teammate
-                else if (p.isMarkedTeammate) {
-                    newProbs = { WEREWOLF: 100 };
-                }
-                // Override: Wolf Logic (If I am Wolf, anyone NOT me and NOT teammate is 0% Wolf)
-                else if (['WEREWOLF', 'WOLF_KING', 'BEAUTY_WOLF'].includes(state.players.find((me: Player) => me.id === state.myPlayerId)?.role || '')) {
-                    newProbs = { WEREWOLF: 0 };
-                }
+            return {
+                players: state.players.map((p) => {
+                    let newProbs = probabilities[p.id] || p.roleProbabilities;
 
-                return {
-                    ...p,
-                    roleProbabilities: newProbs,
-                    analysis: analysisMap?.[p.id] || p.analysis,
-                };
-            }),
-        })),
+                    // === Priority 1: Self (absolute certainty) ===
+                    if (p.id === state.myPlayerId && p.role) {
+                        newProbs = { [p.role]: 100 };
+                    }
+                    // === Priority 2: Exiled Idiot (public: flipped card) ===
+                    else if (p.status === 'EXILED') {
+                        newProbs = { IDIOT: 100 };
+                    }
+                    // === Priority 3: Shooter confirmed identity (public: shot someone) ===
+                    else if (p.tags?.includes('SHOOTER') && p.status === 'DEAD') {
+                        // Shooter died and shot: either HUNTER or WOLF_KING
+                        if (hasHunter && !hasWolfKing) {
+                            newProbs = { HUNTER: 100 };
+                        } else if (!hasHunter && hasWolfKing) {
+                            newProbs = { WOLF_KING: 100 };
+                        } else if (p.isMarkedTeammate || p.markedRole === 'BAD') {
+                            // Known wolf who shot → WOLF_KING
+                            newProbs = { WOLF_KING: 100 };
+                        } else if (p.markedRole === 'GOOD' || p.markedRole === 'SILVER') {
+                            // Verified good who shot → HUNTER
+                            newProbs = { HUNTER: 100 };
+                        } else {
+                            // Both exist, unknown allegiance: high probability both
+                            newProbs = { HUNTER: 50, WOLF_KING: 50 };
+                        }
+                    }
+                    // === Priority 4: Marked Teammate (user-confirmed wolf) ===
+                    else if (p.isMarkedTeammate) {
+                        newProbs = { WEREWOLF: 100 };
+                    }
+                    // === Priority 5: Seer verification marks ===
+                    else if (p.markedRole === 'BAD') {
+                        // 查杀: confirmed wolf team, set wolf roles high
+                        newProbs = { ...newProbs, VILLAGER: 0, SEER: 0, WITCH: 0, HUNTER: 0, GUARD: 0, IDIOT: 0 };
+                    }
+                    else if (p.markedRole === 'GOOD') {
+                        // 金水: confirmed good, zero out all wolf roles
+                        newProbs = { ...newProbs, WEREWOLF: 0, WOLF_KING: 0, BEAUTY_WOLF: 0 };
+                    }
+                    else if (p.markedRole === 'SILVER') {
+                        // 银水 (witch saved): confirmed not wolf
+                        newProbs = { ...newProbs, WEREWOLF: 0, WOLF_KING: 0, BEAUTY_WOLF: 0 };
+                    }
+                    // === Priority 6: Wolf perspective override ===
+                    else if (wolfRoles.includes(state.players.find((me: Player) => me.id === state.myPlayerId)?.role || '')) {
+                        // Keep AI probabilities for other roles, only set WEREWOLF to 0
+                        newProbs = { ...newProbs, WEREWOLF: 0 };
+                    }
+
+                    return {
+                        ...p,
+                        roleProbabilities: newProbs,
+                        analysis: analysisMap?.[p.id] || p.analysis,
+                    };
+                }),
+            }
+        }),
 
     togglePlayerTag: (playerId, tag) => {
         set((state) => ({

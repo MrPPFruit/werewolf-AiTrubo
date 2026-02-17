@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const isDev = require('electron-is-dev');
 const DashScopeClient = require('./dashscope');
 const { DASHSCOPE_API_KEY } = require('./config');
@@ -356,4 +357,30 @@ ipcMain.handle('summarize-speech', async (event, { text }) => {
 process.on('uncaughtException', (error) => {
     console.error('CRITICAL: Main Process Uncaught Exception:', error);
     // Keep app alive if possible
+});
+
+// IPC: Save Game Log File
+ipcMain.handle('save-game-log', async (event, { filename, content }) => {
+    try {
+        // Save to game-logs/ folder in the project root (dev) or app directory (prod)
+        const logsDir = isDev
+            ? path.join(__dirname, '..', 'game-logs')
+            : path.join(app.getPath('userData'), 'game-logs');
+
+        if (!fs.existsSync(logsDir)) {
+            fs.mkdirSync(logsDir, { recursive: true });
+        }
+
+        // Sanitize filename
+        const safeName = filename.replace(/[<>:"/\\|?*]/g, '_');
+        const filePath = path.join(logsDir, safeName);
+
+        fs.writeFileSync(filePath, content, 'utf-8');
+        logger.info(`[GameLog] Saved: ${filePath}`);
+
+        return { success: true, path: filePath };
+    } catch (error) {
+        logger.error('[GameLog] Save failed:', error);
+        return { success: false, error: error.message };
+    }
 });
